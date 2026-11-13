@@ -9,13 +9,16 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "node tests/e2e/stage1.mjs",
+    "test:e2e": "node tests/e2e/stage1.mjs && node tests/e2e/stage2.mjs",
+    "test:e2e1": "node tests/e2e/stage1.mjs",
+    "test:e2e2": "node tests/e2e/stage2.mjs",
     "make-demo": "node scripts/make-demo-room.mjs"
   },
   "dependencies": {
     "@sparkjsdev/spark": "2.4.0",
     "mediabunny": "1.65.2",
-    "three": "0.187.0"
+    "three": "0.187.0",
+    "web-audio-beat-detector": "8.2.39"
   },
   "devDependencies": {
     "@types/three": "0.187.0",

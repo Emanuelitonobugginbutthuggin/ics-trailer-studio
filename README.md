@@ -16,8 +16,8 @@ photos. Built for the ICS Milan Class of 2028 TikTok (@icsmilan.class.of.2028).
 | Stage | What | State |
 |---|---|---|
 | 1 | Load a splat, fix it up, fly, keyframes, export one shot | **Done** |
-| 2 | Trailer timeline, beat-synced cuts, video shots | Next |
-| 3 | Look: motion blur, grade, vignette, grain | Planned |
+| 2 | Trailer timeline, beat-synced cuts, video shots, flash and whip transitions | **Done** |
+| 3 | Look: motion blur, grade, vignette, grain | Next |
 | 4 | Photo shots with estimated depth | Planned |
 | 5 | End title card, polish | Planned |
 
@@ -53,7 +53,7 @@ npm run dev
 
 and open the address it prints (http://localhost:5173).
 
-## How to use it (stage 1)
+## How to use it
 
 ### 1. Load a scan
 Drag `.spz` or `.ply` files from Scaniverse anywhere onto the page (`.splat`
@@ -86,7 +86,8 @@ Shots you already made stay glued to the scan if you change the fix-up later.
 | Z / C, X | Roll left / right, level the roll |
 | [ / ] | Narrower / wider field of view |
 | K | Add a keyframe |
-| Space | Play or pause the shot |
+| Space | Play or pause |
+| T | Switch between shot view and trailer view |
 
 The viewport always has the 9:16 shape of the final video. The dashed box is
 the approximate area TikTok's buttons and captions do not cover.
@@ -105,16 +106,58 @@ the approximate area TikTok's buttons and captions do not cover.
   the subject.
 - **Go** jumps to a keyframe, **Set** replaces it with the current view.
 
-### 5. Export
-**Export this shot** renders the shot to an MP4 and shows it with a
-**Download MP4** button. Keep the tab in front while it renders.
+### 5. Use real footage: video shots
+Drop an `.mp4` or `.mov` clip anywhere. It appears under **Video clips** and a
+shot is made from it. Select the shot and set:
 
-### 6. Save your work
-**Save project** downloads a small `.json` file with your scenes' fix-up and
-all shots. It contains file names only, never the media. To continue later,
-open the tool, drop the `.json` in, then drop the same scan files in again;
-they are matched by name. The tool also autosaves in the browser, so a reload
-loses nothing.
+- **Starts at / Ends at**: the part of the clip to use. The picture follows
+  the slider.
+- **Duration**: how long that part lasts in the trailer. Shorter than the
+  trimmed part is fast motion, longer is slow motion; the panel tells you the
+  speed. **Real-time length** resets it to normal speed.
+- **Easing** and **Speed ramp** work exactly as for camera shots.
+- **Framing**: fill the 9:16 frame (cropping the clip) or show the whole
+  clip, plus zoom and position.
+
+**+ Shot** next to a clip makes another shot from a different part of it.
+
+### 6. Build the trailer on the timeline
+The strip at the bottom is the trailer. Shots play in the order of the
+**Shots** list; move them with the arrow buttons. Untick **Use in the
+trailer** to keep a shot out of it.
+
+- **Music and beat.** Drop in an `.mp3`, `.m4a` or `.wav` of your sound, or
+  press **Load music…**. The tool finds the tempo (BPM) and the first beat,
+  and draws the beat lines and the waveform. Always check the BPM against the
+  song: you can type it, or press **Tap** in time with the music. **from**
+  sets where in the song the trailer starts.
+- **Snap cuts to the beat.** With **Snap** ticked, changing a shot's length
+  makes it end on the nearest beat line. **Snap all cuts** moves every cut at
+  once. **Cuts snap** chooses every beat, half beat, 2 or 4 beats.
+- **Change a length** by dragging the right edge of a block, or with
+  **Duration** in the shot settings.
+- **Transitions.** **Cut in with** on a shot sets how the trailer cuts into
+  it: hard cut, flash, or whip left / right.
+- **Preview.** Switch from **Shot** to **Trailer** (or press T) and press
+  Play: the whole cut plays with the music. Click the time ruler to jump.
+  The preview can stutter; the export never does.
+- The green zone on the ruler is the 15 to 25 second target.
+
+A good pattern for the fast style: a strong 1-second hook first, then shots
+of 1, 2 or 4 beats, a flash or whip every few cuts rather than on every cut.
+
+### 7. Export
+**Export trailer** (bottom right) renders the whole trailer; **Export this
+shot** renders one shot. Both give an MP4 with a **Download MP4** button.
+Keep the tab in front while it renders. The file is silent on purpose: add
+the same sound in TikTok and line it up with the first cut.
+
+### 8. Save your work
+**Save project** downloads a small `.json` file with every setting. It
+contains file names only, never the media. To continue later, open the tool,
+drop the `.json` in, then drop the same scans, clips and music in again; they
+are matched by name and the status line lists what is still missing. The
+tool also autosaves in the browser, so a reload loses nothing.
 
 ## Scanning well with Scaniverse
 
@@ -136,12 +179,23 @@ Menu names can differ between app versions; the ideas stay the same.
 - **Export** each scan as `.spz` (small; use this one) and also as `.ply` as a
   backup. Name the files after the place: `gym.spz`, `entrance.spz`.
 
-### Backup video on an iPhone
+### Video clips from an iPhone
 
 Settings > Camera > Record Video: **4K at 30 fps**, and turn **HDR Video
 off**. Do not use Apple Log or ProRes. Hold the phone vertical, lock focus and
 exposure (press and hold on the screen), move slowly, and hold still for two
-seconds at the start and end of every clip. (Video shots arrive in stage 2.)
+seconds at the start and end of every clip.
+
+- **HEVC is fine in Chrome on a Mac.** iPhones record HEVC by default
+  (Settings > Camera > Formats > High Efficiency) and Chrome on macOS decodes
+  it. If the tool says it cannot decode a clip, switch Formats to **Most
+  Compatible** (H.264) and film again, or use a clip you already have in
+  H.264.
+- **HDR is the one to avoid.** An HDR clip still loads, with a warning: the
+  browser squeezes it into standard range and it can look flat or too
+  bright. Turning HDR Video off before filming avoids this completely.
+- Clips at 60 fps or slow-motion clips work; the export picks the exact frame
+  for each of its 30 frames per second.
 
 ## What has and has not been tested
 
@@ -152,13 +206,28 @@ software-rendered Chromium. In that setup these pass (`npm run test:e2e`):
   phone scan from the SPZ project);
 - levelling from three clicks (within 1 cm over a 6 × 8 m room), crop box,
   flying, keyframes, presets, save / reload / relink;
-- export to MP4: H.264 High, 1080 × 1920, constant 30 fps, exact frame count.
+- export to MP4: H.264 High, 1080 × 1920, constant 30 fps, exact frame count,
+  no audio track;
+- video shots from H.264 clips: export is frame-accurate (every output frame
+  is exactly the right frame of the clip), a clip with rotation metadata
+  (filmed upright) comes out upright, and exported colours match the preview;
+- beat detection on a 128 BPM test track (found 128 BPM, first beat within
+  3 ms), cuts snapped to the beat and rounded to whole frames without drift;
+- flash and whip transitions in the exported file, and real-time trailer
+  playback.
 
-**Not tested there, because it needs real hardware:**
+**Not tested there, because it needs real hardware or real files:**
 
 - speed and memory with real scans on a real GPU (expected to be much faster:
   the software renderer needs about 12 s per frame for the 786,000-splat scan);
 - the Mac's hardware H.264 encoder (the test used Chrome's software encoder);
+- **HEVC and HDR iPhone clips.** The test browser has no HEVC decoder, so it
+  could only confirm that an undecodable clip is reported clearly. Decoding
+  real iPhone footage, and how an HDR clip looks, is untested;
+- 4K clips (the test clips are small) and how smoothly they preview;
+- beat detection on real songs. It is a simple detector that works best on
+  music with a clear kick; always check the BPM it reports;
+- music playback staying in sync over a whole trailer on a real machine;
 - Safari. Use Chrome.
 
 ## Development
@@ -174,6 +243,9 @@ npm test
 ```bash
 npm run build && npm run test:e2e
 ```
+
+The end-to-end tests need Playwright with Chromium, and ffmpeg (it generates
+the test clips and checks the exported files).
 
 `npm run typecheck` checks types. `npm run make-demo` regenerates the demo
 room. See [CLAUDE.md](CLAUDE.md) for the project rules and code map.

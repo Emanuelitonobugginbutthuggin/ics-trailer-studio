@@ -4,7 +4,7 @@ import { button, checkRow, formatBytes, h, numberRow, section, sliderRow } from 
 /** Scenes list and the scan fix-up tools (up, floor, crop). */
 export function renderLeftPanel(app: App, root: HTMLElement) {
   const scroll = root.scrollTop;
-  root.replaceChildren(scenesSection(app), ...fixupSections(app));
+  root.replaceChildren(scenesSection(app), clipsSection(app), ...fixupSections(app));
   root.scrollTop = scroll;
 }
 
@@ -34,6 +34,27 @@ function scenesSection(app: App) {
       button('Add files…', () => document.getElementById('filepick')!.click()),
       button('Frame scan', () => app.frameScene(), { disabled: !app.activeScene || !app.isLoaded(app.activeSceneId!), title: 'Move the camera so the whole scan is in view' }),
     ),
+  );
+}
+
+function clipsSection(app: App) {
+  const items = app.project.videos.map((video) => {
+    const clip = app.clips.get(video.id);
+    const problems = app.clipProblems(video.id);
+    const sub = clip
+      ? `${clip.info.width} × ${clip.info.height} · ${clip.info.duration.toFixed(1)} s${clip.info.fps ? ` · ${clip.info.fps.toFixed(0)} fps` : ''}`
+      : `Missing: drop ${video.fileName} here`;
+    return h(
+      'li',
+      { class: clip && clip.info.canDecode ? '' : 'missing', title: problems.join(' ') },
+      h('div', { class: 'grow' }, h('div', { class: 'title' }, video.name), h('div', { class: 'sub' }, problems.length ? `⚠ ${sub}` : sub)),
+      button('+ Shot', () => app.addVideoShot(video.id), { class: 'btn small', title: 'New shot from another part of this clip' }),
+      button('✕', () => app.removeVideo(video.id), { class: 'btn small icon', title: 'Remove from project' }),
+    );
+  });
+  return section(
+    'Video clips',
+    items.length ? h('ul', { class: 'list' }, items) : h('p', { class: 'hint' }, 'Drop .mp4 or .mov clips anywhere. Each becomes a shot you can trim.'),
   );
 }
 

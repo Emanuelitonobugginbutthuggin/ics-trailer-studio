@@ -1,8 +1,58 @@
 import { SparkRenderer, SplatEdit, SplatEditRgbaBlendMode, SplatEditSdf, SplatEditSdfType, type SplatMesh } from '@sparkjsdev/spark';
 import * as THREE from 'three';
-import { HEIGHT, WIDTH, type CropBox, type Fixup } from '../project/schema';
+import { HEIGHT, WIDTH, type CropBox, type Fixup, type Framing } from '../project/schema';
 import type { Pose } from '../shots/path';
+import { framingTransform } from '../shots/videoTime';
+import { fxActive, type FrameFx } from '../timeline/timeline';
 import { cropBoxTransform } from './fixup';
+
+const QUAD_VERTEX = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`;
+
+// Draws a video frame into the 9:16 frame. Pixel values pass through
+// unchanged; outside the clip is black.
+const VIDEO_FRAGMENT = /* glsl */ `
+  uniform sampler2D tVideo;
+  uniform vec2 uScale;
+  uniform vec2 uOffset;
+  varying vec2 vUv;
+  void main() {
+    vec2 uv = (vUv - 0.5) * uScale + 0.5 + uOffset;
+    vec3 c = texture2D(tVideo, uv).rgb;
+    float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+    gl_FragColor = vec4(c * inside, 1.0);
+  }
+`;
+
+// Transition effects on the finished frame: a whip (sideways slide with a
+// directional blur, mirrored at the edges so no black shows) and a flash.
+const POST_FRAGMENT = /* glsl */ `
+  uniform sampler2D tFrame;
+  uniform float uFlash;
+  uniform float uWhip;
+  varying vec2 vUv;
+  float mirror(float x) {
+    return 1.0 - abs(1.0 - mod(x, 2.0));
+  }
+  void main() {
+    float strength = abs(uWhip);
+    float slide = uWhip * 0.7;
+    float blur = strength * 0.45;
+    vec3 c = vec3(0.0);
+    const int TAPS = 32;
+    for (int i = 0; i < TAPS; i++) {
+      float o = (float(i) / float(TAPS - 1) - 0.5) * blur;
+      c += texture2D(tFrame, vec2(mirror(vUv.x + slide + o), vUv.y)).rgb;
+    }
+    c /= float(TAPS);
+    gl_FragColor = vec4(mix(c, vec3(1.0), clamp(uFlash, 0.0, 1.0)), 1.0);
+  }
+`;
 
 const ASPECT = WIDTH / HEIGHT;
 const tick = (ms = 0) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -38,6 +88,27 @@ export class Viewer {
   private lastTime = 0;
   private savedSize = new THREE.Vector2();
   private savedPixelRatio = 1;
+
+  // full-screen passes: video frames and post effects
+  private quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  private videoMaterial = new THREE.ShaderMaterial({
+    vertexShader: QUAD_VERTEX,
+    fragmentShader: VIDEO_FRAGMENT,
+    uniforms: { tVideo: { value: null }, uScale: { value: new THREE.Vector2(1, 1) }, uOffset: { value: new THREE.Vector2() } },
+    depthTest: false,
+    depthWrite: false,
+  });
+  private postMaterial = new THREE.ShaderMaterial({
+    vertexShader: QUAD_VERTEX,
+    fragmentShader: POST_FRAGMENT,
+    uniforms: { tFrame: { value: null }, uFlash: { value: 0 }, uWhip: { value: 0 } },
+    depthTest: false,
+    depthWrite: false,
+  });
+  private videoQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.videoMaterial);
+  private postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.postMaterial);
+  private frameCopy: THREE.FramebufferTexture | null = null;
+  private exportCanvasTexture: THREE.Texture | null = null;
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -114,11 +185,66 @@ export class Viewer {
     if (this.exporting) return;
     const dt = Math.min(0.1, (time - this.lastTime) / 1000);
     this.lastTime = time;
+    // onFrame draws the frame: draw3D() or drawVideo(), then present()
     this.onFrame?.(dt);
+  }
+
+  /** Draws the 3D scene (live: the splats may still be re-sorting). */
+  draw3D() {
     this.renderer.render(this.scene, this.camera);
   }
 
+  /** Draws a video frame into the 9:16 frame instead of the 3D scene. */
+  drawVideo(texture: THREE.Texture, clipWidth: number, clipHeight: number, framing: Framing) {
+    const { scale, offset } = framingTransform(framing, clipWidth / clipHeight, this.camera.aspect);
+    const u = this.videoMaterial.uniforms;
+    u.tVideo.value = texture;
+    u.uScale.value.set(scale[0], scale[1]);
+    u.uOffset.value.set(offset[0], offset[1]);
+    this.renderer.render(this.videoQuad, this.quadCamera);
+  }
+
+  /** Export: draws an exactly decoded frame (a canvas from the decoder). */
+  drawVideoCanvas(canvas: HTMLCanvasElement | OffscreenCanvas, framing: Framing) {
+    let texture = this.exportCanvasTexture;
+    if (!texture || texture.image !== canvas) {
+      texture?.dispose();
+      texture = new THREE.CanvasTexture(canvas as HTMLCanvasElement);
+      texture.colorSpace = THREE.NoColorSpace;
+      texture.generateMipmaps = false;
+      texture.minFilter = THREE.LinearFilter;
+      this.exportCanvasTexture = texture;
+    }
+    texture.needsUpdate = true;
+    this.drawVideo(texture, canvas.width, canvas.height, framing);
+  }
+
+  /**
+   * Applies transition effects to the frame that was just drawn. The frame
+   * is drawn straight to the canvas first and copied from there, because
+   * Spark blends splats differently (in linear light) when it renders into
+   * an offscreen target, which would change the look of the scan.
+   * Without effects this does nothing, so plain frames are untouched.
+   */
+  present(fx: FrameFx | null) {
+    if (!fx || !fxActive(fx)) return;
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    if (!this.frameCopy || this.frameCopy.image.width !== size.x || this.frameCopy.image.height !== size.y) {
+      this.frameCopy?.dispose();
+      this.frameCopy = new THREE.FramebufferTexture(size.x, size.y);
+      this.frameCopy.minFilter = THREE.LinearFilter;
+      this.frameCopy.magFilter = THREE.LinearFilter;
+    }
+    this.renderer.copyFramebufferToTexture(this.frameCopy);
+    const u = this.postMaterial.uniforms;
+    u.tFrame.value = this.frameCopy;
+    u.uFlash.value = fx.flash;
+    u.uWhip.value = fx.whip;
+    this.renderer.render(this.postQuad, this.quadCamera);
+  }
+
   setMesh(mesh: SplatMesh | null) {
+    if (this.mesh === mesh) return;
     if (this.mesh) this.fixGroup.remove(this.mesh);
     this.mesh = mesh;
     if (mesh) this.fixGroup.add(mesh);

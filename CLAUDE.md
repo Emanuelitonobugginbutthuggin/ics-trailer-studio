@@ -26,7 +26,8 @@ permission to film and publish.
    reopen, ask the user to drop the files in again and match by name.
 8. **Build in stages and show each one working** before starting the next:
    (1) load, fix-up, fly, keyframes, export one shot [done];
-   (2) timeline, beat cuts, video shots; (3) look and motion blur;
+   (2) timeline, beat cuts, video shots, transitions [done];
+   (3) look and motion blur;
    (4) photo depth shots; (5) title card and polish.
 9. **Test with public sample splats** (the user's files are not visible from
    the cloud). After every stage, state clearly what could not be tested
@@ -46,8 +47,9 @@ margins. Sound is added in TikTok, so exports are silent.
 - `npm run dev`: local dev server
 - `npm run typecheck`, `npm test`: types and unit tests (Vitest)
 - `npm run build`: production build to `dist/`
-- `npm run test:e2e`: headless Chromium end-to-end test (needs a build;
-  uses the pre-installed Playwright, software WebGL, ffprobe)
+- `npm run test:e2e`: headless Chromium end-to-end tests, one file per stage
+  (`test:e2e1`, `test:e2e2` run one). Needs a build; uses the pre-installed
+  Playwright, software WebGL, and ffmpeg to make test clips and check output
 - `npm run make-demo`: regenerate `public/samples/demo-room.ply`
 
 Pushing to `main` deploys to GitHub Pages (`.github/workflows/deploy.yml`).
@@ -64,9 +66,15 @@ e2e test before every push.
 - `src/shots/path.ts`: spline camera path, dolly zoom (pure, unit-tested)
 - `src/shots/timing.ts`: easing and speed ramps (pure, unit-tested)
 - `src/shots/presets.ts`: one-click moves
+- `src/shots/videoTime.ts`: clip time and framing for video shots (unit-tested)
+- `src/media/videoClip.ts`: a clip: `<video>` for live preview, Mediabunny
+  `CanvasSink` for exact frames on export
+- `src/media/music.ts`: decode, beat detection, waveform, preview playback
+- `src/timeline/timeline.ts`: trailer layout in whole frames, beat grid and
+  snapping, transition effect curves (pure, unit-tested)
 - `src/export/`: WebCodecs + Mediabunny MP4 encoder (ported from SuperSplat,
-  MIT), offline export loop
-- `src/ui/`: plain DOM panels, no framework
+  MIT); `exportSequence.ts` renders one shot or the whole trailer offline
+- `src/ui/`: plain DOM panels, no framework; `timeline.ts` is the strip
 - `tests/unit/`, `tests/e2e/`, `scripts/make-demo-room.mjs`
 
 ## Conventions and facts worth knowing
@@ -89,3 +97,18 @@ e2e test before every push.
   (slow, about 1 s per frame for the demo room) and has no HEVC decoder.
   `huggingface.co` is blocked there; it must be allowed to test stage 4.
 - Credit third-party code and data in `NOTICE.md`.
+- Shots are a union (`SplatShot | VideoShot`); the trailer is `project.shots`
+  in order, minus those with `inTrailer: false`. A shot's `transition` is the
+  cut INTO it. Cut points are rounded to frames from the running total.
+- Everything on screen is display-referred sRGB: splats, video frames and
+  post effects are never converted to linear light.
+- Post effects must not render splats into a `WebGLRenderTarget`: Spark then
+  switches to linear-light blending, which changes how scans look. The frame
+  is drawn to the canvas and copied with `copyFramebufferToTexture`
+  (`Viewer.present`). With no effect active, `present` does nothing.
+- Video preview and export use different decoders on purpose. Preview
+  (`<video>`) may be a frame off at frame boundaries; export is exact.
+  For clips with no colour tags the two guess different matrices (BT.601 vs
+  BT.709); the UI warns. Phone footage is always tagged.
+- Preview frames are drawn by `App.frame`; the WebGL buffer is cleared after
+  each browser frame, so tests read pixels in the same task as a draw.

@@ -6,7 +6,8 @@ ICS Trailer Studio is built on these open-source projects. All are free to use.
 |---|---|---|
 | [three.js](https://github.com/mrdoob/three.js) 0.187 | 3D scene, camera, maths | MIT |
 | [Spark](https://github.com/sparkjsdev/spark) 2.4.0 (World Labs) | Gaussian splat loading, rendering, sorting, edits | MIT |
-| [Mediabunny](https://github.com/Vanilagy/mediabunny) 1.65.2 | MP4 container writing | MPL-2.0 |
+| [Mediabunny](https://github.com/Vanilagy/mediabunny) 1.65.2 | MP4 container writing, reading video clips frame by frame | MPL-2.0 |
+| [web-audio-beat-detector](https://github.com/chrisguttandin/web-audio-beat-detector) 8.2.39 | Tempo and first-beat detection | MIT |
 | [Vite](https://github.com/vitejs/vite), [TypeScript](https://github.com/microsoft/TypeScript), [Vitest](https://github.com/vitest-dev/vitest) | Build and tests (not shipped in the app) | MIT / Apache-2.0 |
 
 ## Adapted code

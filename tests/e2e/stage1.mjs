@@ -187,7 +187,7 @@ try {
 
   console.log('\nShots and keyframes');
   await lookFrom(page, stand, await worldOf(page, raw([0, 1.2, -4])));
-  await page.getByRole('button', { name: '+ New shot' }).click();
+  await page.getByRole('button', { name: '+ New camera shot' }).click();
   await page.keyboard.press('KeyK');
   await lookFrom(page, await worldOf(page, raw([0.5, 1.4, 0])), await worldOf(page, raw([0, 1.4, -4])));
   await page.getByRole('button', { name: /Add keyframe here/ }).click();

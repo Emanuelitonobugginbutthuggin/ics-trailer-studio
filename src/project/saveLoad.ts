@@ -1,4 +1,4 @@
-import { defaultFixup, newProject, type Project } from './schema';
+import { defaultFixup, defaultTimeline, newProject, type Project } from './schema';
 
 const AUTOSAVE_KEY = 'ics-trailer-studio:autosave:v1';
 
@@ -20,8 +20,14 @@ export function parseProject(text: string): Project {
   const project = newProject();
   project.name = typeof p.name === 'string' ? p.name : project.name;
   project.scenes = (p.scenes ?? []).map((s) => ({ ...s, fixup: { ...defaultFixup(), ...s.fixup } }));
+  project.videos = p.videos ?? [];
+  project.timeline = { ...defaultTimeline(), ...p.timeline };
   const sceneIds = new Set(project.scenes.map((s) => s.id));
-  project.shots = (p.shots ?? []).filter((s) => s.type === 'splat' && sceneIds.has(s.sceneId));
+  const videoIds = new Set(project.videos.map((v) => v.id));
+  project.shots = (p.shots ?? [])
+    .filter((s) => (s.type === 'splat' && sceneIds.has(s.sceneId)) || (s.type === 'video' && videoIds.has(s.videoId)))
+    // fields added after stage 1 get their defaults
+    .map((s) => ({ ...s, inTrailer: s.inTrailer ?? true, transition: s.transition ?? 'cut' }));
   return project;
 }
 

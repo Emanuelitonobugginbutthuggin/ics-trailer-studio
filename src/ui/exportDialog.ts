@@ -1,11 +1,16 @@
 import type { App } from '../app';
-import type { ExportResult } from '../export/exportShot';
+import type { ExportResult } from '../export/exportSequence';
 import { button, downloadBlob, formatBytes, h, toast } from './dom';
 
-/** Runs the export of the active shot with progress, then shows the result. */
-export async function openExportDialog(app: App) {
+const safeName = (name: string, fallback: string) => name.trim().replace(/[^\w\- ]+/g, '').replace(/\s+/g, '-') || fallback;
+
+/** Renders the active shot or the whole trailer with progress, then shows the result. */
+export async function openExportDialog(app: App, what: 'shot' | 'trailer') {
   const shot = app.activeShot;
-  if (!shot) return;
+  if (what === 'shot' && !shot) return;
+  const title = what === 'shot' ? `"${shot!.name}"` : 'the trailer';
+  const fileName = what === 'shot' ? `${safeName(shot!.name, 'shot')}.mp4` : `${safeName(app.project.name, 'trailer')}.mp4`;
+
   const modal = document.getElementById('modal')!;
   const abort = new AbortController();
   const bar = h('progress', { max: 1, value: 0 });
@@ -13,10 +18,10 @@ export async function openExportDialog(app: App) {
   const dialog = h(
     'div',
     { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Export' },
-    h('h2', null, `Rendering "${shot.name}"`),
+    h('h2', null, `Rendering ${title}`),
     bar,
     status,
-    h('p', { class: 'hint' }, 'Keep this tab in front until it finishes. Every frame waits for the splats to sort, so this is slower than real time.'),
+    h('p', { class: 'hint' }, 'Keep this tab in front until it finishes. Every frame is rendered exactly, so this is slower than real time.'),
     h('div', { class: 'actions' }, button('Cancel', () => abort.abort())),
   );
   modal.replaceChildren(dialog);
@@ -31,12 +36,12 @@ export async function openExportDialog(app: App) {
 
   let result: ExportResult;
   try {
-    result = await app.exportActiveShot((p) => {
+    const onProgress = (p: { frame: number; totalFrames: number; elapsed: number }) => {
       bar.value = p.frame / p.totalFrames;
-      const perFrame = p.elapsed / p.frame;
-      const left = Math.max(0, Math.round(perFrame * (p.totalFrames - p.frame)));
+      const left = Math.max(0, Math.round((p.elapsed / p.frame) * (p.totalFrames - p.frame)));
       status.textContent = `Frame ${p.frame} of ${p.totalFrames} · about ${left} s left`;
-    }, abort.signal);
+    };
+    result = what === 'shot' ? await app.exportActiveShot(onProgress, abort.signal) : await app.exportTrailer(onProgress, abort.signal);
   } catch (error) {
     close();
     if ((error as Error).name === 'AbortError') toast('Export cancelled.');
@@ -48,9 +53,8 @@ export async function openExportDialog(app: App) {
   }
 
   url = URL.createObjectURL(result.blob);
-  const fileName = `${shot.name.trim().replace(/[^\w\- ]+/g, '').replace(/\s+/g, '-') || 'shot'}.mp4`;
-  dialog.replaceChildren(
-    h('h2', null, 'Shot rendered'),
+  const parts: (HTMLElement | null)[] = [
+    h('h2', null, what === 'shot' ? 'Shot rendered' : 'Trailer rendered'),
     h('video', { src: url, controls: true, loop: true, autoplay: true, muted: true, playsInline: true }),
     h(
       'dl',
@@ -60,15 +64,17 @@ export async function openExportDialog(app: App) {
       h('dt', null, 'Size'),
       h('dd', null, `1080 × 1920 · ${formatBytes(result.blob.size)}`),
       h('dt', null, 'Codec'),
-      h('dd', null, `H.264 (${result.codec})`),
+      h('dd', null, `H.264 (${result.codec}), no sound`),
     ),
+    what === 'trailer' ? h('p', { class: 'hint' }, 'The file is silent on purpose: add your sound in TikTok and line it up with the first cut.') : null,
     h(
       'div',
       { class: 'actions' },
       button('Close', close),
       button('Download MP4', () => downloadBlob(result.blob, fileName), { class: 'btn primary' }),
     ),
-  );
+  ];
+  dialog.replaceChildren(...parts.filter((p): p is HTMLElement => !!p));
   // exposed for automated tests
   (window as unknown as { __lastExport?: ExportResult }).__lastExport = result;
 }

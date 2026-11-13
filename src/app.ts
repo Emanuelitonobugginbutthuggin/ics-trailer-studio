@@ -1,28 +1,47 @@
 import { SplatMesh } from '@sparkjsdev/spark';
 import * as THREE from 'three';
-import { exportSplatShot, type ExportProgress, type ExportResult } from './export/exportShot';
+import { exportTimeline, singleShotTimeline, type ExportMedia, type ExportProgress, type ExportResult } from './export/exportSequence';
+import { Music } from './media/music';
+import { VideoClip, clipWarnings } from './media/videoClip';
+import { FPS } from './project/schema';
 import { autosave, clearAutosave, loadAutosave, parseProject, serializeProject } from './project/saveLoad';
 import {
   defaultFixup,
   newId,
   newProject,
   newSplatShot,
+  newVideoShot,
   type Fixup,
   type Keyframe,
   type Project,
   type SceneDef,
+  type Shot,
   type SplatShot,
+  type VideoShot,
 } from './project/schema';
 import { fixupFromFloorPoints, fixupMatrix, robustBounds, rotateFixup, type Bounds } from './scene/fixup';
 import { FlyControls } from './scene/flyControls';
 import { Viewer } from './scene/viewer';
 import { ShotSampler, newPose } from './shots/path';
 import { buildPreset, type PresetId } from './shots/presets';
+import { VideoShotSampler } from './shots/videoTime';
+import {
+  MIN_SHOT_SECONDS,
+  beatOffsetFromAudio,
+  buildTimeline,
+  entryIndexAtFrame,
+  frameFx,
+  gridStep,
+  snapDurations,
+  snapTime,
+  type Timeline,
+} from './timeline/timeline';
 import { downloadBlob, toast } from './ui/dom';
 
 const SPLAT_EXTENSIONS = ['spz', 'ply', 'splat', 'ksplat', 'sog'];
 const VIDEO_EXTENSIONS = ['mp4', 'mov', 'm4v', 'webm'];
 const PHOTO_EXTENSIONS = ['jpg', 'jpeg', 'png', 'heic', 'webp'];
+const AUDIO_EXTENSIONS = ['mp3', 'm4a', 'wav', 'aac', 'ogg', 'flac'];
 const MAX_SAMPLES = 200_000;
 
 export type PickMode = null | 'floor3' | 'floor1' | 'dolly';
@@ -48,7 +67,11 @@ export class App {
   project: Project = newProject();
   readonly viewer: Viewer;
   readonly controls: FlyControls;
+  /** loaded scans, by scene id */
   readonly loaded = new Map<string, LoadedScene>();
+  /** loaded clips, by video id */
+  readonly clips = new Map<string, VideoClip>();
+  music: Music | null = null;
 
   activeSceneId: string | null = null;
   activeShotId: string | null = null;
@@ -59,11 +82,22 @@ export class App {
   showGrid = false;
   showSafe = true;
 
+  /** shot: edit and preview one shot. trailer: preview the whole cut with music. */
+  mode: 'shot' | 'trailer' = 'shot';
   playing = false;
   /** playback position within the active shot, 0..1 */
   playTau = 0;
+  /** playback position in the trailer, seconds */
+  trailerTime = 0;
 
-  private sampler: ShotSampler | null = null;
+  private splatSamplers = new Map<string, ShotSampler>();
+  private videoSamplers = new Map<string, VideoShotSampler>();
+  private timelineCache: Timeline | null = null;
+  private shownSceneId: string | null | undefined = undefined;
+  private liveClip: VideoClip | null = null;
+  private taps: number[] = [];
+  /** performance.now() at which trailer time 0 would have played, while playing */
+  private trailerClockStart = 0;
   private listeners = new Set<() => void>();
   private timeListeners = new Set<() => void>();
   private saveTimer = 0;
@@ -103,6 +137,9 @@ export class App {
   }
   /** A value changed but the panels do not need rebuilding. */
   touch() {
+    this.timelineCache = null;
+    this.splatSamplers.clear();
+    this.videoSamplers.clear();
     clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => autosave(this.project), 400);
   }
@@ -120,14 +157,39 @@ export class App {
   get activeScene(): SceneDef | null {
     return this.project.scenes.find((s) => s.id === this.activeSceneId) ?? null;
   }
-  get activeShot(): SplatShot | null {
+  get activeShot(): Shot | null {
     return this.project.shots.find((s) => s.id === this.activeShotId) ?? null;
+  }
+  /** the active shot if it is a camera move through a scan */
+  get activeSplatShot(): SplatShot | null {
+    const shot = this.activeShot;
+    return shot?.type === 'splat' ? shot : null;
   }
   isLoaded(sceneId: string): boolean {
     return this.loaded.has(sceneId);
   }
   get missingScenes(): SceneDef[] {
     return this.project.scenes.filter((s) => !this.loaded.has(s.id));
+  }
+  /** file names the project refers to that have not been dropped in yet */
+  get missingFiles(): string[] {
+    const audio = this.project.timeline.audio;
+    return [
+      ...this.missingScenes.map((s) => s.fileName),
+      ...this.project.videos.filter((v) => !this.clips.has(v.id)).map((v) => v.fileName),
+      ...(audio && !this.music ? [audio.fileName] : []),
+    ];
+  }
+  /** true when the media a shot needs is loaded */
+  shotReady(shot: Shot): boolean {
+    return shot.type === 'splat' ? this.loaded.has(shot.sceneId) : this.clips.has(shot.videoId);
+  }
+  get timeline(): Timeline {
+    this.timelineCache ??= buildTimeline(this.project);
+    return this.timelineCache;
+  }
+  get trailerSeconds(): number {
+    return this.timeline.totalFrames / FPS;
   }
 
   // ---- files -------------------------------------------------------------
@@ -138,9 +200,10 @@ export class App {
       try {
         if (ext === 'json') await this.openProjectFile(file);
         else if (SPLAT_EXTENSIONS.includes(ext)) await this.addSplatFile(file);
-        else if (VIDEO_EXTENSIONS.includes(ext)) toast(`${file.name}: video shots arrive in stage 2. Splat scans work now.`);
-        else if (PHOTO_EXTENSIONS.includes(ext)) toast(`${file.name}: photo shots arrive in stage 4. Splat scans work now.`);
-        else toast(`${file.name}: not a file type this tool uses (.spz, .ply, .splat or a project .json).`, 'error');
+        else if (VIDEO_EXTENSIONS.includes(ext)) await this.addVideoFile(file);
+        else if (AUDIO_EXTENSIONS.includes(ext)) await this.loadMusic(file);
+        else if (PHOTO_EXTENSIONS.includes(ext)) toast(`${file.name}: photo shots arrive in stage 4.`);
+        else toast(`${file.name}: not a file type this tool uses (scans: .spz .ply .splat, clips: .mp4 .mov, music: .mp3 .m4a .wav, or a project .json).`, 'error');
       } catch (error) {
         console.error(error);
         toast(`Could not load ${file.name}: ${(error as Error).message}`, 'error');
@@ -219,6 +282,139 @@ export class App {
     }
   }
 
+  // ---- video clips and music ----------------------------------------------
+
+  private async addVideoFile(file: File) {
+    const sameName = this.project.videos.find((v) => v.fileName.toLowerCase() === file.name.toLowerCase());
+    if (sameName && this.clips.has(sameName.id)) {
+      toast(`${file.name} is already loaded.`);
+      return;
+    }
+    this.busy = `Reading ${file.name}…`;
+    this.changed();
+    const clip = await VideoClip.open(file);
+    const { info } = clip;
+
+    let video = sameName;
+    if (!video) {
+      video = {
+        id: newId('video'),
+        name: file.name.replace(/\.[^.]+$/, ''),
+        fileName: file.name,
+        fileSize: file.size,
+        duration: info.duration,
+        width: info.width,
+        height: info.height,
+      };
+      this.project.videos.push(video);
+    }
+    this.clips.set(video.id, clip);
+    const warnings = clipWarnings(info, clip.previewOk);
+    if (!sameName) this.addVideoShot(video.id);
+    else this.changed();
+    if (warnings.length) toast(`${file.name}: ${warnings.join(' ')}`, !info.canDecode || info.hdr ? 'error' : 'info');
+    else toast(sameName ? `Relinked ${file.name}.` : `Loaded ${file.name}: ${info.width} × ${info.height}, ${info.duration.toFixed(1)} s.`);
+  }
+
+  clipProblems(videoId: string): string[] {
+    const clip = this.clips.get(videoId);
+    return clip ? clipWarnings(clip.info, clip.previewOk) : [];
+  }
+
+  removeVideo(id: string) {
+    const video = this.project.videos.find((v) => v.id === id);
+    if (!video) return;
+    const shots = this.project.shots.filter((s) => s.type === 'video' && s.videoId === id).length;
+    const warn = shots ? ` and its ${shots} shot${shots > 1 ? 's' : ''}` : '';
+    if (!confirm(`Remove "${video.name}"${warn} from the project? The file on your disk is not touched.`)) return;
+    this.stop();
+    if (this.liveClip === this.clips.get(id)) this.liveClip = null;
+    this.clips.get(id)?.dispose();
+    this.clips.delete(id);
+    this.project.videos = this.project.videos.filter((v) => v.id !== id);
+    this.project.shots = this.project.shots.filter((s) => !(s.type === 'video' && s.videoId === id));
+    if (!this.activeShot) this.activeShotId = null;
+    this.changed();
+  }
+
+  addVideoShot(videoId: string): VideoShot | null {
+    const video = this.project.videos.find((v) => v.id === videoId);
+    if (!video) return null;
+    const count = this.project.shots.filter((s) => s.type === 'video' && s.videoId === videoId).length + 1;
+    const shot = newVideoShot(video, `${video.name} ${count}`);
+    this.project.shots.push(shot);
+    this.selectShot(shot.id);
+    return shot;
+  }
+
+  private async loadMusic(file: File) {
+    this.busy = `Reading ${file.name}…`;
+    this.changed();
+    const music = await Music.load(file);
+    this.stop();
+    this.music?.stop();
+    this.music = music;
+    const t = this.project.timeline;
+    if (t.audio && t.audio.fileName.toLowerCase() === file.name.toLowerCase()) {
+      toast(`Relinked ${file.name}.`);
+      return;
+    }
+    t.audio = { fileName: file.name, start: 0, firstBeat: 0 };
+    await this.detectBeat();
+  }
+
+  /** Finds tempo and first beat of the loaded song; the trailer then starts on that beat. */
+  async detectBeat() {
+    const t = this.project.timeline;
+    if (!this.music || !t.audio) return;
+    try {
+      this.busy = 'Finding the beat…';
+      this.changed();
+      const { bpm, firstBeat } = await this.music.detectBeat();
+      t.bpm = bpm;
+      t.audio.firstBeat = firstBeat;
+      // start the trailer on the first beat (rounded down so the beat is never just before 0)
+      t.audio.start = Math.floor(firstBeat * 1000) / 1000;
+      this.updateBeatOffset();
+      toast(`${t.audio.fileName}: ${bpm} BPM. Check it against the song; you can type the BPM or tap it.`);
+    } catch (error) {
+      console.error(error);
+      toast('Could not find a clear beat in this song. Type the BPM or tap it instead.', 'error');
+    } finally {
+      this.busy = null;
+      this.changed();
+    }
+  }
+
+  removeMusic() {
+    this.stop();
+    this.music?.stop();
+    this.music = null;
+    this.project.timeline.audio = null;
+    this.project.timeline.beatOffset = 0;
+    this.changed();
+  }
+
+  /** Call after BPM or song start changed. */
+  updateBeatOffset() {
+    const t = this.project.timeline;
+    t.beatOffset = t.audio ? beatOffsetFromAudio(t.bpm, t.audio.firstBeat, t.audio.start) : 0;
+  }
+
+  /** Tap along with the music: the BPM is the average of the last taps. */
+  tapTempo() {
+    const now = performance.now();
+    if (this.taps.length && now - this.taps[this.taps.length - 1] > 2000) this.taps = [];
+    this.taps.push(now);
+    if (this.taps.length > 8) this.taps.shift();
+    if (this.taps.length >= 3) {
+      const span = (this.taps[this.taps.length - 1] - this.taps[0]) / (this.taps.length - 1);
+      this.project.timeline.bpm = Math.round((60_000 / span) * 10) / 10;
+      this.updateBeatOffset();
+      this.changed();
+    }
+  }
+
   // ---- scenes and fix-up --------------------------------------------------
 
   selectScene(id: string | null, frame = false) {
@@ -227,9 +423,11 @@ export class App {
     this.activeSceneId = id;
     const scene = this.activeScene;
     const loaded = id ? this.loaded.get(id) : undefined;
-    this.viewer.setMesh(loaded?.mesh ?? null);
-    if (scene) this.viewer.applyFixup(scene.fixup);
-    if (this.activeShot && this.activeShot.sceneId !== id) this.activeShotId = null;
+    this.shownSceneId = undefined;
+    this.showScene(id);
+    const shot = this.activeShot;
+    if (shot && (shot.type !== 'splat' || shot.sceneId !== id)) this.activeShotId = null;
+    this.refreshPath();
     if (scene && loaded && frame) this.frameScene();
     this.syncHelpers();
     this.changed();
@@ -238,13 +436,17 @@ export class App {
   removeScene(id: string) {
     const scene = this.project.scenes.find((s) => s.id === id);
     if (!scene) return;
-    const shots = this.project.shots.filter((s) => s.sceneId === id).length;
+    const ofScene = (s: Shot) => s.type === 'splat' && s.sceneId === id;
+    const shots = this.project.shots.filter(ofScene).length;
     const warn = shots ? ` and its ${shots} shot${shots > 1 ? 's' : ''}` : '';
     if (!confirm(`Remove "${scene.name}"${warn} from the project? The file on your disk is not touched.`)) return;
+    this.stop();
+    this.shownSceneId = undefined;
+    this.viewer.setMesh(null);
     this.loaded.get(id)?.mesh.dispose();
     this.loaded.delete(id);
     this.project.scenes = this.project.scenes.filter((s) => s.id !== id);
-    this.project.shots = this.project.shots.filter((s) => s.sceneId !== id);
+    this.project.shots = this.project.shots.filter((s) => !ofScene(s));
     if (this.activeSceneId === id) this.selectScene(this.project.scenes[0]?.id ?? null);
     else this.changed();
   }
@@ -300,7 +502,7 @@ export class App {
     const v = new THREE.Vector3();
     const q = new THREE.Quaternion();
     for (const shot of this.project.shots) {
-      if (shot.sceneId !== scene.id) continue;
+      if (shot.type !== 'splat' || shot.sceneId !== scene.id) continue;
       for (const k of shot.keyframes) {
         v.set(...k.position).applyMatrix4(delta);
         k.position = [v.x, v.y, v.z];
@@ -322,7 +524,7 @@ export class App {
 
     scene.fixup = next;
     this.viewer.applyFixup(next);
-    this.rebuildSampler();
+    this.refreshPath();
     this.changed();
   }
 
@@ -377,6 +579,9 @@ export class App {
     const loaded = !!scene && this.loaded.has(scene.id);
     this.viewer.grid.visible = this.showGrid && loaded;
     this.viewer.cropOutline.visible = loaded && !!scene?.fixup.crop.enabled && this.showGrid;
+    // helper lines are for editing a camera move only
+    this.viewer.helpers.visible = this.mode === 'shot' && !this.playing && this.activeShot?.type !== 'video';
+    this.controls.enabled = this.viewer.helpers.visible;
   }
 
   // ---- picking points in the scene ----------------------------------------
@@ -401,12 +606,12 @@ export class App {
       this.setFloor(scene.fixup.floorY + point.y);
       toast('Floor level set.');
     } else if (this.pickMode === 'dolly') {
-      const shot = this.activeShot;
+      const shot = this.activeSplatShot;
       this.setPickMode(null);
       if (shot) {
         shot.dolly.target = [point.x, point.y, point.z];
         shot.dolly.enabled = true;
-        this.rebuildSampler();
+        this.refreshPath();
         toast('Dolly zoom subject set.');
       }
       this.changed();
@@ -438,7 +643,7 @@ export class App {
   addShot(): SplatShot | null {
     const scene = this.activeScene;
     if (!scene) return null;
-    const count = this.project.shots.filter((s) => s.sceneId === scene.id).length + 1;
+    const count = this.project.shots.filter((s) => s.type === 'splat' && s.sceneId === scene.id).length + 1;
     const shot = newSplatShot(scene.id, `${scene.name} ${count}`);
     this.project.shots.push(shot);
     this.selectShot(shot.id);
@@ -447,38 +652,57 @@ export class App {
 
   selectShot(id: string | null) {
     this.stop();
+    this.setPickMode(null);
     this.activeShotId = id;
     const shot = this.activeShot;
-    if (shot && shot.sceneId !== this.activeSceneId) {
+    if (shot?.type === 'splat' && shot.sceneId !== this.activeSceneId) {
       this.selectScene(shot.sceneId);
       this.activeShotId = id;
     }
     this.playTau = 0;
-    this.rebuildSampler();
+    // in trailer view, selecting a shot jumps to where it starts
+    const entry = this.timeline.entries.find((e) => e.shot.id === id);
+    if (this.mode === 'trailer' && entry) this.trailerTime = entry.startFrame / FPS;
+    this.refreshPath();
+    this.syncHelpers();
     this.changed();
   }
 
   deleteShot(id: string) {
     const shot = this.project.shots.find((s) => s.id === id);
     if (!shot || !confirm(`Delete shot "${shot.name}"?`)) return;
+    this.stop();
     this.project.shots = this.project.shots.filter((s) => s.id !== id);
     if (this.activeShotId === id) this.activeShotId = null;
-    this.rebuildSampler();
+    this.refreshPath();
+    this.syncHelpers();
     this.changed();
   }
 
   duplicateShot(id: string) {
     const shot = this.project.shots.find((s) => s.id === id);
     if (!shot) return;
-    const copy: SplatShot = JSON.parse(JSON.stringify(shot));
+    const copy: Shot = JSON.parse(JSON.stringify(shot));
     copy.id = newId('shot');
     copy.name = `${shot.name} copy`;
     this.project.shots.splice(this.project.shots.indexOf(shot) + 1, 0, copy);
     this.selectShot(copy.id);
   }
 
+  /** Moves a shot earlier (-1) or later (+1) in the trailer order. */
+  moveShot(id: string, by: number) {
+    const shots = this.project.shots;
+    const from = shots.findIndex((s) => s.id === id);
+    const to = from + by;
+    if (from < 0 || to < 0 || to >= shots.length) return;
+    const [shot] = shots.splice(from, 1);
+    shots.splice(to, 0, shot);
+    this.changed();
+  }
+
   addKeyframe() {
-    let shot = this.activeShot;
+    if (this.mode !== 'shot' || this.activeShot?.type === 'video') return;
+    let shot = this.activeSplatShot;
     if (!shot) shot = this.addShot();
     if (!shot) {
       toast('Load a scan first, then add keyframes.', 'error');
@@ -486,40 +710,41 @@ export class App {
     }
     this.stop();
     shot.keyframes.push(poseToKeyframe(this.viewer.getPose(this.pose)));
-    this.rebuildSampler();
+    this.refreshPath();
     this.changed();
   }
 
   updateKeyframe(index: number) {
-    const shot = this.activeShot;
+    const shot = this.activeSplatShot;
     if (!shot?.keyframes[index]) return;
     this.stop();
     shot.keyframes[index] = poseToKeyframe(this.viewer.getPose(this.pose));
-    this.rebuildSampler();
+    this.refreshPath();
     this.changed();
   }
 
   deleteKeyframe(index: number) {
-    const shot = this.activeShot;
+    const shot = this.activeSplatShot;
     if (!shot) return;
     shot.keyframes.splice(index, 1);
-    this.rebuildSampler();
+    this.refreshPath();
     this.changed();
   }
 
   moveKeyframe(index: number, by: number) {
-    const shot = this.activeShot;
+    const shot = this.activeSplatShot;
     const to = index + by;
     if (!shot || to < 0 || to >= shot.keyframes.length) return;
     const [k] = shot.keyframes.splice(index, 1);
     shot.keyframes.splice(to, 0, k);
-    this.rebuildSampler();
+    this.refreshPath();
     this.changed();
   }
 
   gotoKeyframe(index: number) {
-    const k = this.activeShot?.keyframes[index];
+    const k = this.activeSplatShot?.keyframes[index];
     if (!k) return;
+    this.setMode('shot');
     this.stop();
     this.pose.position.set(...k.position);
     this.pose.quaternion.set(...k.quaternion);
@@ -529,13 +754,14 @@ export class App {
   }
 
   applyPreset(id: PresetId) {
-    let shot = this.activeShot;
+    let shot = this.activeSplatShot;
     if (shot && shot.keyframes.length && !confirm('Replace the keyframes of this shot with the preset move?')) return;
     if (!shot) shot = this.addShot();
     if (!shot) {
       toast('Load a scan first.', 'error');
       return;
     }
+    this.setMode('shot');
     this.stop();
     const pose = this.viewer.getPose(newPose());
     // aim the move at what is in the middle of the view
@@ -543,45 +769,136 @@ export class App {
     const pivot = this.viewer.raycastNdc(0, 0) ?? pose.position.clone().addScaledVector(forward, 3);
     const result = buildPreset(id, pose, pivot);
     shot.keyframes = result.keyframes;
-    shot.duration = result.duration;
     shot.easing = result.easing;
     shot.ramp = result.ramp;
-    this.rebuildSampler();
+    this.setShotDuration(shot, result.duration);
+    this.refreshPath();
     this.changed();
     this.play();
   }
 
-  /** Call after any change to the active shot's keyframes or timing. */
-  rebuildSampler() {
-    const shot = this.activeShot;
-    this.sampler = shot && shot.keyframes.length ? new ShotSampler(shot) : null;
+  private splatSampler(shot: SplatShot): ShotSampler | null {
+    if (!shot.keyframes.length) return null;
+    let sampler = this.splatSamplers.get(shot.id);
+    if (!sampler) this.splatSamplers.set(shot.id, (sampler = new ShotSampler(shot)));
+    return sampler;
+  }
+
+  private videoSampler(shot: VideoShot, clip: VideoClip): VideoShotSampler {
+    let sampler = this.videoSamplers.get(shot.id);
+    if (!sampler) this.videoSamplers.set(shot.id, (sampler = new VideoShotSampler(shot, clip.info.duration)));
+    return sampler;
+  }
+
+  /** Redraws the path line of the active shot. Call after its keyframes or timing change. */
+  refreshPath() {
+    this.splatSamplers.clear();
+    this.videoSamplers.clear();
+    const shot = this.activeSplatShot;
+    const sampler = shot ? this.splatSampler(shot) : null;
     const keys = shot ? shot.keyframes.map((k) => new THREE.Vector3(...k.position)) : [];
-    this.viewer.setPath(this.sampler ? this.sampler.path.polyline() : [], keys);
+    this.viewer.setPath(sampler ? sampler.path.polyline() : [], keys);
   }
 
   /** Shot settings changed through a slider or field: no panel rebuild. */
   shotEdited() {
-    this.rebuildSampler();
     this.touch();
-    if (!this.playing && this.sampler) this.scrub(this.playTau);
+    this.refreshPath();
+    if (!this.playing && this.mode === 'shot') this.scrub(this.playTau);
+  }
+
+  /** Average playback speed of a video shot relative to real time. */
+  videoShotRate(shot: VideoShot): number {
+    return (shot.trimOut - shot.trimIn) / shot.duration;
+  }
+
+  // ---- trailer timeline ------------------------------------------------------
+
+  /** Trailer time at which a shot starts, or null if it is not in the trailer. */
+  private shotStart(shot: Shot): number | null {
+    let time = 0;
+    for (const s of this.project.shots) {
+      if (s === shot) return s.inTrailer ? time : null;
+      if (s.inTrailer) time += s.duration;
+    }
+    return null;
+  }
+
+  /**
+   * Sets a shot's length. With snapping on, the shot's end lands on the
+   * nearest beat line (at least one grid step after its start).
+   */
+  setShotDuration(shot: Shot, seconds: number) {
+    const t = this.project.timeline;
+    let duration = Math.max(MIN_SHOT_SECONDS, seconds);
+    const start = this.shotStart(shot);
+    if (t.snap && start !== null) {
+      const step = gridStep(t);
+      let end = snapTime(t, start + duration);
+      while (end - start < Math.max(MIN_SHOT_SECONDS, step * 0.5)) end += step;
+      duration = end - start;
+    }
+    shot.duration = Math.round(duration * 1e4) / 1e4;
+    this.touch();
+  }
+
+  /** Moves every cut of the trailer onto the beat grid. */
+  snapAllCuts() {
+    const shots = this.project.shots.filter((s) => s.inTrailer);
+    const snapped = snapDurations(shots.map((s) => s.duration), this.project.timeline);
+    shots.forEach((s, i) => (s.duration = snapped[i]));
+    this.changed();
+    toast(`${shots.length} cuts moved onto the beat.`);
+  }
+
+  setMode(mode: 'shot' | 'trailer') {
+    if (this.mode === mode) return;
+    this.stop();
+    this.setPickMode(null);
+    this.mode = mode;
+    if (mode === 'trailer') {
+      const entry = this.timeline.entries.find((e) => e.shot.id === this.activeShotId);
+      if (entry) this.trailerTime = entry.startFrame / FPS;
+    } else {
+      this.liveClip?.pause();
+      this.showScene(this.activeSceneId);
+    }
+    this.syncHelpers();
+    this.changed();
+  }
+
+  scrubTrailer(seconds: number) {
+    this.stop();
+    this.trailerTime = Math.min(Math.max(0, seconds), Math.max(0, this.trailerSeconds - 1 / FPS));
+    this.notifyTime();
   }
 
   // ---- preview playback ----------------------------------------------------
 
   play() {
-    if (!this.sampler || !this.activeShot) return;
-    if (this.playTau >= 1) this.playTau = 0;
+    if (this.playing) return;
+    if (this.mode === 'trailer') {
+      if (!this.timeline.entries.length) return;
+      if (this.trailerTime >= this.trailerSeconds - 2 / FPS) this.trailerTime = 0;
+      const audio = this.project.timeline.audio;
+      if (this.music && audio) this.music.play(audio.start + this.trailerTime);
+      this.trailerClockStart = performance.now() - this.trailerTime * 1000;
+    } else {
+      const shot = this.activeShot;
+      if (!shot || (shot.type === 'splat' && !shot.keyframes.length)) return;
+      if (this.playTau >= 1) this.playTau = 0;
+    }
     this.playing = true;
-    this.controls.enabled = false;
-    this.viewer.helpers.visible = false;
+    this.syncHelpers();
     this.changed();
   }
 
   stop() {
     if (!this.playing) return;
     this.playing = false;
-    this.controls.enabled = true;
-    this.viewer.helpers.visible = true;
+    this.music?.stop();
+    this.liveClip?.pause();
+    this.syncHelpers();
     this.changed();
   }
 
@@ -590,22 +907,107 @@ export class App {
     else this.play();
   }
 
+  /** Moves to a position within the active shot (0..1). */
   scrub(tau: number) {
-    if (!this.sampler) return;
     this.playTau = Math.min(1, Math.max(0, tau));
-    this.viewer.setPose(this.sampler.sample(this.playTau, this.pose));
+    const shot = this.activeSplatShot;
+    const sampler = shot ? this.splatSampler(shot) : null;
+    if (sampler && this.mode === 'shot') this.viewer.setPose(sampler.sample(this.playTau, this.pose));
     this.notifyTime();
   }
 
+  /** Shows a scan in the viewport without changing what is selected. */
+  private showScene(id: string | null) {
+    if (this.shownSceneId === id) return;
+    this.shownSceneId = id;
+    const scene = this.project.scenes.find((s) => s.id === id);
+    this.viewer.setMesh((id && this.loaded.get(id)?.mesh) || null);
+    if (scene) this.viewer.applyFixup(scene.fixup);
+  }
+
+  /** Draws one live frame of a shot at tau (0..1). */
+  private drawShot(shot: Shot, tau: number, playing: boolean) {
+    const viewer = this.viewer;
+    if (shot.type === 'video') {
+      const clip = this.clips.get(shot.videoId);
+      if (this.liveClip && this.liveClip !== clip) this.liveClip.pause();
+      this.liveClip = clip ?? null;
+      if (!clip) {
+        viewer.renderer.clear();
+        return;
+      }
+      const sampler = this.videoSampler(shot, clip);
+      clip.sync(sampler.timeAt(tau), playing, sampler.rateAt(tau));
+      viewer.drawVideo(clip.texture, clip.info.width, clip.info.height, shot.framing);
+      return;
+    }
+    if (this.liveClip) {
+      this.liveClip.pause();
+      this.liveClip = null;
+    }
+    this.showScene(shot.sceneId);
+    const sampler = this.splatSampler(shot);
+    if (sampler) viewer.setPose(sampler.sample(tau, this.pose));
+    viewer.draw3D();
+  }
+
   private frame(dt: number) {
-    if (this.playing && this.sampler && this.activeShot) {
-      this.playTau += dt / this.activeShot.duration;
+    const viewer = this.viewer;
+
+    if (this.mode === 'trailer') {
+      const timeline = this.timeline;
+      if (!timeline.entries.length) {
+        viewer.renderer.clear();
+        return;
+      }
+      if (this.playing) {
+        // follow the real clock, not the frame count, so the picture stays in
+        // step with the music even when the preview drops frames
+        this.trailerTime = (performance.now() - this.trailerClockStart) / 1000;
+        if (this.trailerTime >= this.trailerSeconds) {
+          this.trailerTime = Math.max(0, this.trailerSeconds - 1 / FPS);
+          this.stop();
+        }
+      }
+      const framePos = Math.min(this.trailerTime * FPS, timeline.totalFrames - 0.001);
+      const frame = Math.floor(framePos);
+      const index = entryIndexAtFrame(timeline, frame);
+      const entry = timeline.entries[index];
+      const tau = (framePos - entry.startFrame) / (entry.endFrame - entry.startFrame);
+      this.drawShot(entry.shot, Math.min(1, Math.max(0, tau)), this.playing);
+      viewer.present(frameFx(timeline, index, frame));
+      // have the next clip waiting on its first frame, so the cut is instant
+      const next = timeline.entries[index + 1]?.shot;
+      if (this.playing && next?.type === 'video') {
+        const clip = this.clips.get(next.videoId);
+        if (clip && clip !== this.liveClip) clip.sync(this.videoSampler(next, clip).timeAt(0), false, 1);
+      }
+      if (this.playing) this.notifyTime();
+      return;
+    }
+
+    const shot = this.activeShot;
+    if (this.playing && shot) {
+      this.playTau += dt / shot.duration;
       if (this.playTau >= 1) this.playTau %= 1; // loop
-      this.viewer.setPose(this.sampler.sample(this.playTau, this.pose));
       this.notifyTime();
+    }
+    if (shot?.type === 'video') {
+      this.drawShot(shot, this.playTau, this.playing);
+      return;
+    }
+    this.showScene(this.activeSceneId);
+    if (this.liveClip) {
+      this.liveClip.pause();
+      this.liveClip = null;
+    }
+    if (this.playing && shot) {
+      const sampler = this.splatSampler(shot);
+      if (sampler) viewer.setPose(sampler.sample(this.playTau, this.pose));
     } else {
       this.controls.update(dt, this.modifiers.shift, this.modifiers.alt);
     }
+    viewer.draw3D();
   }
 
   private trackModifiers(e: KeyboardEvent) {
@@ -626,6 +1028,8 @@ export class App {
     } else if (e.code === 'Space') {
       this.togglePlay();
       e.preventDefault();
+    } else if (e.code === 'KeyT') {
+      this.setMode(this.mode === 'shot' ? 'trailer' : 'shot');
     } else if (e.code === 'Escape') {
       if (this.pickMode) {
         this.setPickMode(null);
@@ -636,20 +1040,63 @@ export class App {
 
   // ---- export --------------------------------------------------------------
 
+  /** Why a shot cannot be exported right now, or null if it can. */
+  shotProblem(shot: Shot): string | null {
+    if (shot.type === 'splat') {
+      const scene = this.project.scenes.find((s) => s.id === shot.sceneId);
+      if (!this.loaded.has(shot.sceneId)) return `"${shot.name}": drop in ${scene?.fileName ?? 'its scan'} first.`;
+      if (!shot.keyframes.length) return `"${shot.name}" has no keyframes yet.`;
+      return null;
+    }
+    const video = this.project.videos.find((v) => v.id === shot.videoId);
+    const clip = this.clips.get(shot.videoId);
+    if (!clip) return `"${shot.name}": drop in ${video?.fileName ?? 'its clip'} first.`;
+    if (!clip.info.canDecode) return `"${shot.name}": this browser cannot decode ${video?.fileName}. ${clipWarnings(clip.info, clip.previewOk)[0]}`;
+    return null;
+  }
+
+  private exportMedia(): ExportMedia {
+    return {
+      scene: (shot) => {
+        const scene = this.project.scenes.find((s) => s.id === shot.sceneId);
+        const loaded = this.loaded.get(shot.sceneId);
+        return scene && loaded ? { mesh: loaded.mesh, fixup: scene.fixup } : null;
+      },
+      clip: (shot) => this.clips.get(shot.videoId) ?? null,
+    };
+  }
+
+  private async runExport(timeline: Timeline, onProgress: (p: ExportProgress) => void, signal: AbortSignal): Promise<ExportResult> {
+    this.stop();
+    this.setPickMode(null);
+    this.liveClip?.pause();
+    this.controls.enabled = false;
+    const camera = this.viewer.getPose(newPose());
+    try {
+      return await exportTimeline(this.viewer, this.exportMedia(), timeline, { onProgress, signal });
+    } finally {
+      // put the viewport back the way it was
+      this.shownSceneId = undefined;
+      this.showScene(this.activeSceneId);
+      this.viewer.setPose(camera);
+      this.syncHelpers();
+    }
+  }
+
   async exportActiveShot(onProgress: (p: ExportProgress) => void, signal: AbortSignal): Promise<ExportResult> {
     const shot = this.activeShot;
     if (!shot) throw new Error('Select a shot first.');
-    if (!this.loaded.has(shot.sceneId)) throw new Error('The scan for this shot is not loaded. Drop its file in first.');
-    if (shot.keyframes.length === 0) throw new Error('This shot has no keyframes yet.');
-    this.stop();
-    this.setPickMode(null);
-    if (this.activeSceneId !== shot.sceneId) this.selectScene(shot.sceneId);
-    this.controls.enabled = false;
-    try {
-      return await exportSplatShot(this.viewer, shot, { onProgress, signal });
-    } finally {
-      this.controls.enabled = true;
-    }
+    const problem = this.shotProblem(shot);
+    if (problem) throw new Error(problem);
+    return this.runExport(singleShotTimeline(shot), onProgress, signal);
+  }
+
+  async exportTrailer(onProgress: (p: ExportProgress) => void, signal: AbortSignal): Promise<ExportResult> {
+    const timeline = buildTimeline(this.project);
+    if (!timeline.entries.length) throw new Error('The trailer has no shots yet.');
+    const problems = timeline.entries.map((e) => this.shotProblem(e.shot)).filter((p): p is string => !!p);
+    if (problems.length) throw new Error(problems.slice(0, 3).join(' '));
+    return this.runExport(timeline, onProgress, signal);
   }
 
   // ---- project files ---------------------------------------------------------
@@ -665,7 +1112,7 @@ export class App {
     const hasWork = this.project.scenes.length || this.project.shots.length;
     if (hasWork && !confirm('Open this project and replace the one on screen?')) return;
     this.replaceProject(project);
-    const missing = this.missingScenes.map((s) => s.fileName);
+    const missing = this.missingFiles;
     toast(missing.length ? `Project opened. Now drop in: ${missing.join(', ')}` : 'Project opened.');
   }
 
@@ -678,6 +1125,8 @@ export class App {
 
   private replaceProject(project: Project) {
     this.stop();
+    this.shownSceneId = undefined;
+    this.viewer.setMesh(null);
     // keep scans that are already in memory when the new project uses the same files
     const keep = new Map<string, LoadedScene>();
     for (const scene of project.scenes) {
@@ -692,7 +1141,28 @@ export class App {
     this.loaded.clear();
     for (const [id, loaded] of keep) this.loaded.set(id, loaded);
 
+    // the same for clips and music
+    const keepClips = new Map<string, VideoClip>();
+    for (const video of project.videos) {
+      const old = this.project.videos.find((v) => v.fileName.toLowerCase() === video.fileName.toLowerCase());
+      const clip = old ? this.clips.get(old.id) : undefined;
+      if (old && clip) {
+        keepClips.set(video.id, clip);
+        this.clips.delete(old.id);
+      }
+    }
+    for (const unused of this.clips.values()) unused.dispose();
+    this.clips.clear();
+    for (const [id, clip] of keepClips) this.clips.set(id, clip);
+    this.liveClip = null;
+    if (this.music && project.timeline.audio?.fileName.toLowerCase() !== this.music.fileName.toLowerCase()) {
+      this.music.stop();
+      this.music = null;
+    }
+
     this.project = project;
+    this.mode = 'shot';
+    this.trailerTime = 0;
     this.activeShotId = null;
     this.selectScene(project.scenes[0]?.id ?? null, true);
   }

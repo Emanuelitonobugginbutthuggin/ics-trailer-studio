@@ -57,27 +57,80 @@ export interface DollyZoom {
   target: Vec3 | null;
 }
 
-export interface SplatShot {
+export type Transition = 'cut' | 'flash' | 'whipLeft' | 'whipRight';
+
+/** Fields every kind of shot has. */
+interface ShotBase {
   id: string;
-  type: 'splat';
   name: string;
-  sceneId: string;
+  /** length of the shot in the trailer, seconds */
   duration: number;
   easing: Easing;
   ramp: SpeedRamp;
+  /** part of the trailer (shots are played in list order) */
+  inTrailer: boolean;
+  /** how the trailer cuts INTO this shot */
+  transition: Transition;
+}
+
+export interface SplatShot extends ShotBase {
+  type: 'splat';
+  sceneId: string;
   dolly: DollyZoom;
   keyframes: Keyframe[];
 }
 
-// Video and photo shots join this union in later stages.
-export type Shot = SplatShot;
+/** How a clip is placed in the 9:16 frame. */
+export interface Framing {
+  /** cover: fill the frame, cropping the clip. contain: show the whole clip. */
+  fit: 'cover' | 'contain';
+  zoom: number;
+  /** -1..1: which part of the cropped-away area is shown */
+  panX: number;
+  panY: number;
+}
+
+export interface VideoShot extends ShotBase {
+  type: 'video';
+  videoId: string;
+  /** trimmed part of the clip, in clip seconds; played over `duration` with easing and ramp */
+  trimIn: number;
+  trimOut: number;
+  framing: Framing;
+}
+
+export type Shot = SplatShot | VideoShot;
+
+/** A video file on the user's disk, remembered by name. */
+export interface VideoDef {
+  id: string;
+  name: string;
+  fileName: string;
+  fileSize: number;
+  duration: number;
+  width: number;
+  height: number;
+}
+
+export interface TimelineSettings {
+  bpm: number;
+  /** trailer time of one beat, seconds */
+  beatOffset: number;
+  /** cuts snap to every `division` beats (0.5 = half beats) */
+  division: number;
+  snap: boolean;
+  /** music used to find the beat; never exported */
+  audio: { fileName: string; /** song time at trailer start, seconds */ start: number; /** song time of its first beat */ firstBeat: number } | null;
+}
 
 export interface Project {
   app: 'ics-trailer-studio';
   version: 1;
   name: string;
   scenes: SceneDef[];
+  videos: VideoDef[];
   shots: Shot[];
+  timeline: TimelineSettings;
 }
 
 export function newId(prefix: string): string {
@@ -92,9 +145,15 @@ export function defaultFixup(): Fixup {
   };
 }
 
-export function newProject(): Project {
-  return { app: 'ics-trailer-studio', version: 1, name: 'ICS Milan trailer', scenes: [], shots: [] };
+export function defaultTimeline(): TimelineSettings {
+  return { bpm: 120, beatOffset: 0, division: 1, snap: true, audio: null };
 }
+
+export function newProject(): Project {
+  return { app: 'ics-trailer-studio', version: 1, name: 'ICS Milan trailer', scenes: [], videos: [], shots: [], timeline: defaultTimeline() };
+}
+
+const defaultRamp = (): SpeedRamp => ({ enabled: false, strength: 4, center: 0.5, width: 0.6 });
 
 export function newSplatShot(sceneId: string, name: string): SplatShot {
   return {
@@ -104,8 +163,28 @@ export function newSplatShot(sceneId: string, name: string): SplatShot {
     sceneId,
     duration: 1.5,
     easing: 'linear',
-    ramp: { enabled: false, strength: 4, center: 0.5, width: 0.6 },
+    ramp: defaultRamp(),
+    inTrailer: true,
+    transition: 'cut',
     dolly: { enabled: false, target: null },
     keyframes: [],
+  };
+}
+
+export function newVideoShot(video: VideoDef, name: string): VideoShot {
+  const length = Math.min(2, video.duration);
+  return {
+    id: newId('shot'),
+    type: 'video',
+    name,
+    videoId: video.id,
+    duration: Math.max(0.2, Math.round(length * 10) / 10),
+    easing: 'linear',
+    ramp: defaultRamp(),
+    inTrailer: true,
+    transition: 'cut',
+    trimIn: 0,
+    trimOut: length,
+    framing: { fit: 'cover', zoom: 1, panX: 0, panY: 0 },
   };
 }

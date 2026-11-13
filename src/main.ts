@@ -2,6 +2,7 @@ import { App } from './app';
 import { button, h, toast } from './ui/dom';
 import { renderLeftPanel } from './ui/leftPanel';
 import { renderRightPanel } from './ui/rightPanel';
+import { TimelineView } from './ui/timeline';
 import './ui/styles.css';
 
 const PUBLIC_SAMPLE_URL = 'https://raw.githubusercontent.com/nianticlabs/spz/main/samples/hornedlizard.spz';
@@ -46,24 +47,27 @@ function boot() {
     h('span', { class: 'brand' }, h('b', null, 'ICS'), ' Trailer Studio'),
     nameInput,
     button('New', () => app.newProject(), { title: 'Start an empty project' }),
-    button('Open…', () => filePick.click(), { title: 'Open a project .json, or add scans' }),
+    button('Open…', () => filePick.click(), { title: 'Open a project .json, or add scans, clips and music' }),
     button('Save project', () => app.saveProjectFile(), { title: 'Download the project as a .json file' }),
     h('span', { class: 'spacer' }),
     status,
   );
 
   // ---- transport ----
-  const playBtn = button('▶ Play', () => app.togglePlay(), { title: 'Preview the shot (Space)' });
+  const shotView = button('Shot', () => app.setMode('shot'), { title: 'Edit and preview the selected shot (T switches)' });
+  const trailerView = button('Trailer', () => app.setMode('trailer'), { title: 'Preview the whole trailer with cuts, transitions and music (T switches)' });
+  const playBtn = button('▶ Play', () => app.togglePlay(), { title: 'Play or pause (Space)' });
   const scrub = h('input', {
     type: 'range',
     min: '0',
     max: '1',
-    step: '0.001',
+    step: '0.0005',
     value: '0',
-    'aria-label': 'Scrub through the shot',
+    'aria-label': 'Scrub',
     onInput: () => {
       app.stop();
-      app.scrub(Number(scrub.value));
+      if (app.mode === 'trailer') app.scrubTrailer(Number(scrub.value) * app.trailerSeconds);
+      else app.scrub(Number(scrub.value));
     },
   });
   const time = h('span', { class: 'time' });
@@ -82,33 +86,53 @@ function boot() {
     app.showSafe = !app.showSafe;
     refresh();
   });
-  $('transport').append(playBtn, scrub, time, h('label', { class: 'speed' }, 'Fly speed', speed), safeToggle);
+  $('transport').append(
+    h('span', { class: 'seg', role: 'group', 'aria-label': 'View' }, shotView, trailerView),
+    playBtn,
+    scrub,
+    time,
+    h('label', { class: 'speed' }, 'Fly speed', speed),
+    safeToggle,
+  );
+  const timelineView = new TimelineView(app, $('timeline'));
 
   // ---- rendering of UI state ----
   function refreshHud() {
     const cam = app.viewer.camera;
-    hud.textContent = `fov ${cam.fov.toFixed(0)}°  speed ${app.controls.speed.toFixed(1)} m/s`;
     const shot = app.activeShot;
-    scrub.value = String(app.playTau);
-    time.textContent = shot ? `${(app.playTau * shot.duration).toFixed(2)} / ${shot.duration.toFixed(2)} s` : '';
+    const flying = app.mode === 'shot' && shot?.type !== 'video';
+    hud.textContent = flying ? `fov ${cam.fov.toFixed(0)}°  speed ${app.controls.speed.toFixed(1)} m/s` : app.mode === 'trailer' ? 'trailer preview' : 'video clip';
+    if (app.mode === 'trailer') {
+      const total = app.trailerSeconds;
+      scrub.value = String(total > 0 ? app.trailerTime / total : 0);
+      time.textContent = `${app.trailerTime.toFixed(2)} / ${total.toFixed(2)} s`;
+    } else {
+      scrub.value = String(app.playTau);
+      time.textContent = shot ? `${(app.playTau * shot.duration).toFixed(2)} / ${shot.duration.toFixed(2)} s` : '';
+    }
+    timelineView.updatePlayhead();
   }
 
   function refresh() {
     renderLeftPanel(app, left);
     renderRightPanel(app, right);
+    timelineView.render();
     if (document.activeElement !== nameInput) nameInput.value = app.project.name;
 
-    const hasScenes = app.project.scenes.length > 0;
-    empty.hidden = hasScenes;
+    const shot = app.activeShot;
+    empty.hidden = app.project.scenes.length > 0 || app.project.videos.length > 0;
     safe.style.display = app.showSafe ? '' : 'none';
     safeToggle.classList.toggle('active', app.showSafe);
+    shotView.classList.toggle('active', app.mode === 'shot');
+    trailerView.classList.toggle('active', app.mode === 'trailer');
     playBtn.textContent = app.playing ? '❚❚ Pause' : '▶ Play';
-    playBtn.disabled = !app.activeShot || app.activeShot.keyframes.length === 0;
-    scrub.disabled = playBtn.disabled;
+    const canPlay = app.mode === 'trailer' ? app.timeline.entries.length > 0 : !!shot && (shot.type === 'video' || shot.keyframes.length > 0);
+    playBtn.disabled = !canPlay;
+    scrub.disabled = !canPlay;
     speed.value = String(Math.log2(app.controls.speed));
 
-    const missing = app.missingScenes;
-    status.textContent = app.busy ?? (missing.length ? `Missing media: drop ${missing.map((s) => s.fileName).join(', ')}` : 'WASD move · drag look · Q/E down/up · K keyframe · Space play');
+    const missing = app.missingFiles;
+    status.textContent = app.busy ?? (missing.length ? `Missing media: drop ${missing.join(', ')}` : 'WASD move · drag look · K keyframe · Space play · T trailer view');
     status.style.color = missing.length && !app.busy ? 'var(--warn)' : '';
 
     pickHint.textContent =
@@ -126,8 +150,8 @@ function boot() {
     h(
       'div',
       { class: 'drop' },
-      h('h1', null, 'Drop your scans here'),
-      h('p', null, 'Gaussian splat files from Scaniverse: .spz or .ply (also .splat). Everything stays on this computer; nothing is uploaded.'),
+      h('h1', null, 'Drop your scans and clips here'),
+      h('p', null, 'Gaussian splat scans from Scaniverse (.spz or .ply), video clips (.mp4, .mov) and your music (.mp3, .m4a, .wav). Everything stays on this computer; nothing is uploaded.'),
       h(
         'div',
         { class: 'btns' },

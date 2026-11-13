@@ -1,12 +1,14 @@
 // Tiny DOM helpers: no framework needed for a tool this size.
 
 type Child = Node | string | number | null | undefined | false;
+/** children may be nested in arrays, so helpers can return several rows */
+export type Children = Child | Children[];
 type Props = Record<string, unknown> | null;
 
 export function h<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   props?: Props,
-  ...children: (Child | Child[])[]
+  ...children: Children[]
 ): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag);
   if (props) {
@@ -20,7 +22,7 @@ export function h<K extends keyof HTMLElementTagNameMap>(
       } else el.setAttribute(key, String(value));
     }
   }
-  for (const child of children.flat()) {
+  for (const child of (children as unknown[]).flat(Infinity) as Child[]) {
     if (child === null || child === undefined || child === false) continue;
     el.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
@@ -90,7 +92,7 @@ export function checkRow(label: string, checked: boolean, onChange: (v: boolean)
   return h('label', { class: 'row check', title }, input, h('span', null, label));
 }
 
-export function section(title: string, ...children: (Child | Child[])[]) {
+export function section(title: string, ...children: Children[]) {
   return h('section', { class: 'panel-section' }, h('h3', null, title), ...children);
 }
 
