@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ICS Trailer Studio</title>
+    <meta name="description" content="Render a vertical cinematic trailer from 3D scans, video clips and photos, entirely in your browser." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23ff4d6d'/><path d='M12 9l12 7-12 7z' fill='white'/></svg>" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar"></header>
+      <aside id="left" class="panel" aria-label="Scenes and scan fix-up"></aside>
+      <main id="stage">
+        <div id="frame">
+          <canvas id="view" tabindex="0" aria-label="3D viewport"></canvas>
+          <div id="safe" aria-hidden="true"><span>TikTok safe area (approx.)</span></div>
+          <div id="hud"></div>
+          <div id="pickhint"></div>
+        </div>
+        <div id="empty"></div>
+      </main>
+      <footer id="transport"></footer>
+      <aside id="right" class="panel" aria-label="Shots and keyframes"></aside>
+    </div>
+    <div id="dropveil"><div>Drop scans (.spz, .ply, .splat) or a project .json</div></div>
+    <div id="modal" hidden></div>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <input id="filepick" type="file" multiple hidden accept=".spz,.ply,.splat,.ksplat,.sog,.json,.mp4,.mov,.jpg,.jpeg,.png,.heic" />
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
