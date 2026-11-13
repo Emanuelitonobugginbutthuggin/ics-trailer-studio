@@ -1,3 +1,4 @@
+import { completeLook } from '../look/look';
 import { defaultFixup, defaultTimeline, newProject, type Project } from './schema';
 
 const AUTOSAVE_KEY = 'ics-trailer-studio:autosave:v1';
@@ -22,6 +23,7 @@ export function parseProject(text: string): Project {
   project.scenes = (p.scenes ?? []).map((s) => ({ ...s, fixup: { ...defaultFixup(), ...s.fixup } }));
   project.videos = p.videos ?? [];
   project.timeline = { ...defaultTimeline(), ...p.timeline };
+  project.look = completeLook(p.look);
   const sceneIds = new Set(project.scenes.map((s) => s.id));
   const videoIds = new Set(project.videos.map((v) => v.id));
   project.shots = (p.shots ?? [])

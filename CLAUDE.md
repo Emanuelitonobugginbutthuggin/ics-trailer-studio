@@ -27,7 +27,7 @@ permission to film and publish.
 8. **Build in stages and show each one working** before starting the next:
    (1) load, fix-up, fly, keyframes, export one shot [done];
    (2) timeline, beat cuts, video shots, transitions [done];
-   (3) look and motion blur;
+   (3) look and motion blur [done];
    (4) photo depth shots; (5) title card and polish.
 9. **Test with public sample splats** (the user's files are not visible from
    the cloud). After every stage, state clearly what could not be tested
@@ -48,7 +48,7 @@ margins. Sound is added in TikTok, so exports are silent.
 - `npm run typecheck`, `npm test`: types and unit tests (Vitest)
 - `npm run build`: production build to `dist/`
 - `npm run test:e2e`: headless Chromium end-to-end tests, one file per stage
-  (`test:e2e1`, `test:e2e2` run one). Needs a build; uses the pre-installed
+  (`test:e2e1`, `test:e2e2`, `test:e2e3` run one). Needs a build; uses the pre-installed
   Playwright, software WebGL, and ffmpeg to make test clips and check output
 - `npm run make-demo`: regenerate `public/samples/demo-room.ply`
 
@@ -72,8 +72,12 @@ e2e test before every push.
 - `src/media/music.ts`: decode, beat detection, waveform, preview playback
 - `src/timeline/timeline.ts`: trailer layout in whole frames, beat grid and
   snapping, transition effect curves (pure, unit-tested)
+- `src/look/look.ts`: look settings, presets, shutter sub-frame positions
+  (pure, unit-tested); the shaders that apply it are in `scene/viewer.ts`
 - `src/export/`: WebCodecs + Mediabunny MP4 encoder (ported from SuperSplat,
-  MIT); `exportSequence.ts` renders one shot or the whole trailer offline
+  MIT); `exportSequence.ts` renders one shot or the whole trailer offline.
+  `renderEntryFrames` is the one place exact frames are made (export and
+  the test frame both use it)
 - `src/ui/`: plain DOM panels, no framework; `timeline.ts` is the strip
 - `tests/unit/`, `tests/e2e/`, `scripts/make-demo-room.mjs`
 
@@ -110,5 +114,14 @@ e2e test before every push.
   (`<video>`) may be a frame off at frame boundaries; export is exact.
   For clips with no colour tags the two guess different matrices (BT.601 vs
   BT.709); the UI warns. Phone footage is always tagged.
+- One look (`project.look`) for the whole trailer. Finishing order in the
+  post shader: whip, grade, vignette, flash, grain. The grade works on
+  display values, like a photo editor. Grain cells scale with the frame
+  height so preview and export look alike.
+- Motion blur is export-only: per output frame, N exactly sorted sub-frames
+  spread over the open shutter are summed in linear light in a half-float
+  target (`Viewer.accumBegin/accumAdd`), then converted back. Camera shots
+  only; a shot with one keyframe is not accumulated.
+- The earlier stage tests switch the look off; `stage3.mjs` tests it.
 - Preview frames are drawn by `App.frame`; the WebGL buffer is cleared after
   each browser frame, so tests read pixels in the same task as a draw.

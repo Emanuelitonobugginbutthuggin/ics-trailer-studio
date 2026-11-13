@@ -17,8 +17,8 @@ photos. Built for the ICS Milan Class of 2028 TikTok (@icsmilan.class.of.2028).
 |---|---|---|
 | 1 | Load a splat, fix it up, fly, keyframes, export one shot | **Done** |
 | 2 | Trailer timeline, beat-synced cuts, video shots, flash and whip transitions | **Done** |
-| 3 | Look: motion blur, grade, vignette, grain | Next |
-| 4 | Photo shots with estimated depth | Planned |
+| 3 | Look: motion blur, grade, vignette, grain | **Done** |
+| 4 | Photo shots with estimated depth | Next |
 | 5 | End title card, polish | Planned |
 
 ## Open it
@@ -146,13 +146,34 @@ trailer** to keep a shot out of it.
 A good pattern for the fast style: a strong 1-second hook first, then shots
 of 1, 2 or 4 beats, a flash or whip every few cuts rather than on every cut.
 
-### 7. Export
+### 7. Set the look
+The **Look** tab (top of the right panel) styles the whole trailer at once.
+What you set there is what you see in the preview and get in every export.
+
+- **Presets**: Cinematic (the default), Punchy, Moody, Warm, None.
+- **Grade**: exposure, contrast, saturation, warmth, teal & orange (teal
+  shadows, orange highlights), faded blacks.
+- **Vignette and grain**. Keep grain light: TikTok compresses video hard and
+  heavy grain turns into mush.
+- **Motion blur** gives fast camera moves real blur. Each frame is the
+  average of several moments while a virtual shutter is open. **Samples** is
+  how many moments (8 suits most shots; raise it if a very fast move shows
+  stepping); **Shutter** is how long it stays open (180° is the film
+  standard). It applies to camera shots only: video clips keep the blur they
+  were filmed with. It is not shown in the live preview, and it makes camera
+  shots take about as many times longer to export as there are samples.
+- **Render test frame** shows the frame under the playhead exactly as the
+  export will make it, motion blur included. Use it to judge the blur before
+  a long export.
+- Untick **Use the look** to see and export the untouched picture.
+
+### 8. Export
 **Export trailer** (bottom right) renders the whole trailer; **Export this
 shot** renders one shot. Both give an MP4 with a **Download MP4** button.
 Keep the tab in front while it renders. The file is silent on purpose: add
 the same sound in TikTok and line it up with the first cut.
 
-### 8. Save your work
+### 9. Save your work
 **Save project** downloads a small `.json` file with every setting. It
 contains file names only, never the media. To continue later, open the tool,
 drop the `.json` in, then drop the same scans, clips and music in again; they
@@ -214,13 +235,20 @@ software-rendered Chromium. In that setup these pass (`npm run test:e2e`):
 - beat detection on a 128 BPM test track (found 128 BPM, first beat within
   3 ms), cuts snapped to the beat and rounded to whole frames without drift;
 - flash and whip transitions in the exported file, and real-time trailer
-  playback.
+  playback;
+- the look: each grade control measured against known colours, vignette,
+  grain, the exported file matching the preview, and motion blur (a fast
+  sideways move smears sideways only, keeps the amount of light, and
+  averaging identical sub-frames changes nothing).
 
 **Not tested there, because it needs real hardware or real files:**
 
 - speed and memory with real scans on a real GPU (expected to be much faster:
   the software renderer needs about 12 s per frame for the 786,000-splat scan);
 - the Mac's hardware H.264 encoder (the test used Chrome's software encoder);
+- how long motion blur takes on real scans, and whether 8 samples is enough
+  for your fastest moves (check with **Render test frame**);
+- how the grain survives TikTok's own compression;
 - **HEVC and HDR iPhone clips.** The test browser has no HEVC decoder, so it
   could only confirm that an undecodable clip is reported clearly. Decoding
   real iPhone footage, and how an HDR clip looks, is untested;

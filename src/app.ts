@@ -1,6 +1,7 @@
 import { SplatMesh } from '@sparkjsdev/spark';
 import * as THREE from 'three';
-import { exportTimeline, singleShotTimeline, type ExportMedia, type ExportProgress, type ExportResult } from './export/exportSequence';
+import { exportTimeline, renderEntryFrames, singleShotTimeline, type ExportMedia, type ExportProgress, type ExportResult } from './export/exportSequence';
+import { LOOK_PRESETS, type LookSettings } from './look/look';
 import { Music } from './media/music';
 import { VideoClip, clipWarnings } from './media/videoClip';
 import { FPS } from './project/schema';
@@ -96,6 +97,12 @@ export class App {
   private shownSceneId: string | null | undefined = undefined;
   private liveClip: VideoClip | null = null;
   private taps: number[] = [];
+  /** which tab the right panel shows */
+  rightTab: 'shots' | 'look' = 'shots';
+  /** a test frame at export quality is on screen; the live loop leaves it alone */
+  still = false;
+  /** true while a test frame is being rendered */
+  rendering = false;
   /** performance.now() at which trailer time 0 would have played, while playing */
   private trailerClockStart = 0;
   private listeners = new Set<() => void>();
@@ -108,7 +115,10 @@ export class App {
     this.viewer = new Viewer(canvas, stage);
     this.controls = new FlyControls(this.viewer.camera, canvas);
     this.controls.onClick = (x, y) => this.handleClick(x, y);
-    this.controls.onMove = () => this.notifyTime();
+    this.controls.onMove = () => {
+      this.still = false;
+      this.notifyTime();
+    };
     this.viewer.onFrame = (dt) => this.frame(dt);
 
     window.addEventListener('keydown', (e) => this.onKey(e));
@@ -137,6 +147,7 @@ export class App {
   }
   /** A value changed but the panels do not need rebuilding. */
   touch() {
+    this.still = false;
     this.timelineCache = null;
     this.splatSamplers.clear();
     this.videoSamplers.clear();
@@ -869,6 +880,7 @@ export class App {
 
   scrubTrailer(seconds: number) {
     this.stop();
+    this.still = false;
     this.trailerTime = Math.min(Math.max(0, seconds), Math.max(0, this.trailerSeconds - 1 / FPS));
     this.notifyTime();
   }
@@ -877,6 +889,7 @@ export class App {
 
   play() {
     if (this.playing) return;
+    this.still = false;
     if (this.mode === 'trailer') {
       if (!this.timeline.entries.length) return;
       if (this.trailerTime >= this.trailerSeconds - 2 / FPS) this.trailerTime = 0;
@@ -909,6 +922,7 @@ export class App {
 
   /** Moves to a position within the active shot (0..1). */
   scrub(tau: number) {
+    this.still = false;
     this.playTau = Math.min(1, Math.max(0, tau));
     const shot = this.activeSplatShot;
     const sampler = shot ? this.splatSampler(shot) : null;
@@ -951,8 +965,15 @@ export class App {
     viewer.draw3D();
   }
 
+  /** The look as the live preview shows it (grade, vignette, grain; motion blur is export-only). */
+  private get liveLook(): LookSettings | null {
+    return this.project.look.enabled ? this.project.look : null;
+  }
+
   private frame(dt: number) {
     const viewer = this.viewer;
+    if (this.still) return;
+    const seed = Math.floor(performance.now() / (1000 / FPS));
 
     if (this.mode === 'trailer') {
       const timeline = this.timeline;
@@ -975,7 +996,7 @@ export class App {
       const entry = timeline.entries[index];
       const tau = (framePos - entry.startFrame) / (entry.endFrame - entry.startFrame);
       this.drawShot(entry.shot, Math.min(1, Math.max(0, tau)), this.playing);
-      viewer.present(frameFx(timeline, index, frame));
+      viewer.present(frameFx(timeline, index, frame), this.liveLook, seed);
       // have the next clip waiting on its first frame, so the cut is instant
       const next = timeline.entries[index + 1]?.shot;
       if (this.playing && next?.type === 'video') {
@@ -994,6 +1015,7 @@ export class App {
     }
     if (shot?.type === 'video') {
       this.drawShot(shot, this.playTau, this.playing);
+      viewer.present(null, this.liveLook, seed);
       return;
     }
     this.showScene(this.activeSceneId);
@@ -1008,6 +1030,7 @@ export class App {
       this.controls.update(dt, this.modifiers.shift, this.modifiers.alt);
     }
     viewer.draw3D();
+    viewer.present(null, this.liveLook, seed);
   }
 
   private trackModifiers(e: KeyboardEvent) {
@@ -1073,13 +1096,79 @@ export class App {
     this.controls.enabled = false;
     const camera = this.viewer.getPose(newPose());
     try {
-      return await exportTimeline(this.viewer, this.exportMedia(), timeline, { onProgress, signal });
+      return await exportTimeline(this.viewer, this.exportMedia(), timeline, { onProgress, signal, look: this.project.look });
     } finally {
       // put the viewport back the way it was
       this.shownSceneId = undefined;
       this.showScene(this.activeSceneId);
       this.viewer.setPose(camera);
       this.syncHelpers();
+    }
+  }
+
+  // ---- look ----------------------------------------------------------------
+
+  applyLookPreset(id: string) {
+    const preset = LOOK_PRESETS.find((p) => p.id === id);
+    if (!preset) return;
+    Object.assign(this.project.look, preset.grade, { enabled: true });
+    this.changed();
+  }
+
+  /**
+   * Renders the frame under the playhead exactly as the export would,
+   * including motion blur, and leaves it on screen until the next action.
+   * Preview size, not 1080 x 1920, so it is quick.
+   */
+  async renderTestFrame() {
+    if (this.rendering || this.viewer.exporting) return;
+    let timeline: Timeline;
+    let index: number;
+    let frame: number;
+    if (this.mode === 'trailer') {
+      timeline = this.timeline;
+      if (!timeline.entries.length) return;
+      const at = Math.min(Math.floor(this.trailerTime * FPS), timeline.totalFrames - 1);
+      index = entryIndexAtFrame(timeline, at);
+      frame = at - timeline.entries[index].startFrame;
+    } else {
+      const shot = this.activeShot;
+      if (!shot) {
+        toast('Select a shot first: the test frame is rendered from its camera move.', 'error');
+        return;
+      }
+      timeline = singleShotTimeline(shot);
+      index = 0;
+      frame = Math.min(Math.floor(this.playTau * timeline.totalFrames), timeline.totalFrames - 1);
+    }
+    const problem = this.shotProblem(timeline.entries[index].shot);
+    if (problem) {
+      toast(problem, 'error');
+      return;
+    }
+    this.stop();
+    this.setPickMode(null);
+    this.rendering = true;
+    this.changed();
+    const camera = this.viewer.getPose(newPose());
+    this.viewer.beginExport();
+    try {
+      await renderEntryFrames(this.viewer, this.exportMedia(), timeline, index, [frame], this.project.look, () => {});
+      this.still = true;
+    } catch (error) {
+      console.error(error);
+      toast(`Could not render the test frame: ${(error as Error).message}`, 'error');
+    } finally {
+      this.viewer.endExport();
+      this.shownSceneId = undefined;
+      this.showScene(this.activeSceneId);
+      this.viewer.setPose(camera);
+      this.rendering = false;
+      const keep = this.still;
+      this.changed(); // rebuilds the panels (and clears `still` through touch)
+      this.still = keep;
+      this.syncHelpers();
+      this.notifyTime(); // the viewport label now says it is a test frame
     }
   }
 

@@ -9,9 +9,10 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "node tests/e2e/stage1.mjs && node tests/e2e/stage2.mjs",
+    "test:e2e": "node tests/e2e/stage1.mjs && node tests/e2e/stage2.mjs && node tests/e2e/stage3.mjs",
     "test:e2e1": "node tests/e2e/stage1.mjs",
     "test:e2e2": "node tests/e2e/stage2.mjs",
+    "test:e2e3": "node tests/e2e/stage3.mjs",
     "make-demo": "node scripts/make-demo-room.mjs"
   },
   "dependencies": {

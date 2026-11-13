@@ -174,6 +174,11 @@ try {
   }
 
   console.log('\nMedia');
+  // this test checks the plain pipeline; the look (grade, grain, motion blur) has its own test
+  await page.evaluate(() => {
+    window.__app.project.look.enabled = false;
+    window.__app.changed();
+  });
   await page.getByRole('button', { name: 'Try the demo room' }).click();
   await page.waitForFunction(() => window.__app.loaded.size === 1 && !window.__app.busy, null, { timeout: 120_000 });
   await page.evaluate(() => {

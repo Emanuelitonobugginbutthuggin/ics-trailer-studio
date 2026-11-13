@@ -101,7 +101,15 @@ function boot() {
     const cam = app.viewer.camera;
     const shot = app.activeShot;
     const flying = app.mode === 'shot' && shot?.type !== 'video';
-    hud.textContent = flying ? `fov ${cam.fov.toFixed(0)}°  speed ${app.controls.speed.toFixed(1)} m/s` : app.mode === 'trailer' ? 'trailer preview' : 'video clip';
+    hud.textContent = app.rendering
+      ? 'rendering test frame…'
+      : app.still
+        ? 'test frame at export quality'
+        : flying
+          ? `fov ${cam.fov.toFixed(0)}°  speed ${app.controls.speed.toFixed(1)} m/s`
+          : app.mode === 'trailer'
+            ? 'trailer preview'
+            : 'video clip';
     if (app.mode === 'trailer') {
       const total = app.trailerSeconds;
       scrub.value = String(total > 0 ? app.trailerTime / total : 0);

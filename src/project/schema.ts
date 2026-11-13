@@ -1,3 +1,5 @@
+import { defaultLook, type LookSettings } from '../look/look';
+
 // Project file format. Everything here is plain JSON: media (scans, clips,
 // photos) is never embedded, only remembered by file name.
 
@@ -131,6 +133,7 @@ export interface Project {
   videos: VideoDef[];
   shots: Shot[];
   timeline: TimelineSettings;
+  look: LookSettings;
 }
 
 export function newId(prefix: string): string {
@@ -150,7 +153,7 @@ export function defaultTimeline(): TimelineSettings {
 }
 
 export function newProject(): Project {
-  return { app: 'ics-trailer-studio', version: 1, name: 'ICS Milan trailer', scenes: [], videos: [], shots: [], timeline: defaultTimeline() };
+  return { app: 'ics-trailer-studio', version: 1, name: 'ICS Milan trailer', scenes: [], videos: [], shots: [], timeline: defaultTimeline(), look: defaultLook() };
 }
 
 const defaultRamp = (): SpeedRamp => ({ enabled: false, strength: 4, center: 0.5, width: 0.6 });

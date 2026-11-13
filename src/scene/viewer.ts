@@ -1,5 +1,6 @@
 import { SparkRenderer, SplatEdit, SplatEditRgbaBlendMode, SplatEditSdf, SplatEditSdfType, type SplatMesh } from '@sparkjsdev/spark';
 import * as THREE from 'three';
+import { gradeActive, type LookSettings } from '../look/look';
 import { HEIGHT, WIDTH, type CropBox, type Fixup, type Framing } from '../project/schema';
 import type { Pose } from '../shots/path';
 import { framingTransform } from '../shots/videoTime';
@@ -29,28 +30,105 @@ const VIDEO_FRAGMENT = /* glsl */ `
   }
 `;
 
-// Transition effects on the finished frame: a whip (sideways slide with a
-// directional blur, mirrored at the edges so no black shows) and a flash.
+const SRGB_GLSL = /* glsl */ `
+  vec3 toLinear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+  }
+  vec3 toSRGB(vec3 c) {
+    c = max(c, 0.0);
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+  }
+`;
+
+// Motion blur: adds one sub-frame to the running sum. The sum is kept in
+// linear light, as a camera sensor would collect it, so bright things
+// leave bright streaks instead of grey ones.
+const ACCUM_FRAGMENT = /* glsl */ `
+  uniform sampler2D tFrame;
+  uniform float uWeight;
+  varying vec2 vUv;
+  ${SRGB_GLSL}
+  void main() {
+    gl_FragColor = vec4(toLinear(texture2D(tFrame, vUv).rgb) * uWeight, 1.0);
+  }
+`;
+
+// The finishing pass on every frame, in this order: whip (sideways slide
+// with a directional blur, mirrored at the edges so no black shows), colour
+// grade, vignette, flash, grain.
 const POST_FRAGMENT = /* glsl */ `
   uniform sampler2D tFrame;
+  uniform bool uLinearInput;
   uniform float uFlash;
   uniform float uWhip;
+  uniform float uExposure;
+  uniform float uContrast;
+  uniform float uSaturation;
+  uniform float uWarmth;
+  uniform float uSplit;
+  uniform float uFade;
+  uniform float uVignette;
+  uniform float uGrain;
+  uniform float uSeed;
+  uniform vec2 uResolution;
   varying vec2 vUv;
+  ${SRGB_GLSL}
+  const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
   float mirror(float x) {
     return 1.0 - abs(1.0 - mod(x, 2.0));
   }
+  float hash(vec2 p) {
+    vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.x + q.y) * q.z);
+  }
+  vec3 source(vec2 uv) {
+    vec3 c = texture2D(tFrame, uv).rgb;
+    return uLinearInput ? toSRGB(c) : c;
+  }
+
   void main() {
+    vec3 c;
     float strength = abs(uWhip);
-    float slide = uWhip * 0.7;
-    float blur = strength * 0.45;
-    vec3 c = vec3(0.0);
-    const int TAPS = 32;
-    for (int i = 0; i < TAPS; i++) {
-      float o = (float(i) / float(TAPS - 1) - 0.5) * blur;
-      c += texture2D(tFrame, vec2(mirror(vUv.x + slide + o), vUv.y)).rgb;
+    if (strength > 0.001) {
+      float slide = uWhip * 0.7;
+      float blur = strength * 0.45;
+      c = vec3(0.0);
+      const int TAPS = 32;
+      for (int i = 0; i < TAPS; i++) {
+        float o = (float(i) / float(TAPS - 1) - 0.5) * blur;
+        c += source(vec2(mirror(vUv.x + slide + o), vUv.y));
+      }
+      c /= float(TAPS);
+    } else {
+      c = source(vUv);
     }
-    c /= float(TAPS);
-    gl_FragColor = vec4(mix(c, vec3(1.0), clamp(uFlash, 0.0, 1.0)), 1.0);
+
+    // grade, on display values so the sliders behave like a photo editor
+    c *= exp2(uExposure);
+    c *= vec3(1.0 + 0.10 * uWarmth, 1.0, 1.0 - 0.10 * uWarmth);
+    c = (c - 0.45) * uContrast + 0.45;
+    float l = clamp(dot(c, LUMA), 0.0, 1.0);
+    c += uSplit * 0.10 * mix(vec3(-0.55, 0.05, 0.50), vec3(0.50, 0.10, -0.55), smoothstep(0.15, 0.85, l));
+    c = mix(vec3(dot(c, LUMA)), c, uSaturation);
+    c = clamp(c, 0.0, 1.0);
+    c = c * (1.0 - uFade) + uFade;
+
+    vec2 d = (vUv - 0.5) * 2.0;
+    c *= 1.0 - uVignette * 0.8 * smoothstep(0.55, 1.45, length(d));
+
+    c = mix(c, vec3(1.0), clamp(uFlash, 0.0, 1.0));
+
+    // grain: the same size relative to the frame in preview and export
+    // (about 2 px at 1080 x 1920, so it survives video compression)
+    if (uGrain > 0.0) {
+      vec2 cell = floor(gl_FragCoord.xy / max(1.0, uResolution.y / 960.0));
+      float n = hash(cell + uSeed * vec2(17.13, 31.71)) + hash(cell.yx + uSeed * vec2(5.77, 91.3)) - 1.0;
+      float lum = dot(c, LUMA);
+      c += n * uGrain * 0.22 * (1.0 - 0.6 * abs(2.0 * lum - 1.0));
+    }
+    gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
   }
 `;
 
@@ -88,6 +166,7 @@ export class Viewer {
   private lastTime = 0;
   private savedSize = new THREE.Vector2();
   private savedPixelRatio = 1;
+  private exportResized = false;
 
   // full-screen passes: video frames and post effects
   private quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -101,10 +180,39 @@ export class Viewer {
   private postMaterial = new THREE.ShaderMaterial({
     vertexShader: QUAD_VERTEX,
     fragmentShader: POST_FRAGMENT,
-    uniforms: { tFrame: { value: null }, uFlash: { value: 0 }, uWhip: { value: 0 } },
+    uniforms: {
+      tFrame: { value: null },
+      uLinearInput: { value: false },
+      uFlash: { value: 0 },
+      uWhip: { value: 0 },
+      uExposure: { value: 0 },
+      uContrast: { value: 1 },
+      uSaturation: { value: 1 },
+      uWarmth: { value: 0 },
+      uSplit: { value: 0 },
+      uFade: { value: 0 },
+      uVignette: { value: 0 },
+      uGrain: { value: 0 },
+      uSeed: { value: 0 },
+      uResolution: { value: new THREE.Vector2(1, 1) },
+    },
     depthTest: false,
     depthWrite: false,
   });
+  private accumMaterial = new THREE.ShaderMaterial({
+    vertexShader: QUAD_VERTEX,
+    fragmentShader: ACCUM_FRAGMENT,
+    uniforms: { tFrame: { value: null }, uWeight: { value: 1 } },
+    depthTest: false,
+    depthWrite: false,
+    // sub-frames add up
+    blending: THREE.CustomBlending,
+    blendEquation: THREE.AddEquation,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.OneFactor,
+  });
+  private accumQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.accumMaterial);
+  private accumTarget: THREE.WebGLRenderTarget | null = null;
   private videoQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.videoMaterial);
   private postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.postMaterial);
   private frameCopy: THREE.FramebufferTexture | null = null;
@@ -219,15 +327,8 @@ export class Viewer {
     this.drawVideo(texture, canvas.width, canvas.height, framing);
   }
 
-  /**
-   * Applies transition effects to the frame that was just drawn. The frame
-   * is drawn straight to the canvas first and copied from there, because
-   * Spark blends splats differently (in linear light) when it renders into
-   * an offscreen target, which would change the look of the scan.
-   * Without effects this does nothing, so plain frames are untouched.
-   */
-  present(fx: FrameFx | null) {
-    if (!fx || !fxActive(fx)) return;
+  /** The frame on the canvas, copied into a texture the post pass can read. */
+  private copyFrame(): THREE.FramebufferTexture {
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
     if (!this.frameCopy || this.frameCopy.image.width !== size.x || this.frameCopy.image.height !== size.y) {
       this.frameCopy?.dispose();
@@ -236,10 +337,76 @@ export class Viewer {
       this.frameCopy.magFilter = THREE.LinearFilter;
     }
     this.renderer.copyFramebufferToTexture(this.frameCopy);
+    return this.frameCopy;
+  }
+
+  /** Motion blur needs a render target with more than 8 bits per channel. */
+  get canAccumulate(): boolean {
+    const ext = this.renderer.extensions;
+    return ext.has('EXT_color_buffer_float') || ext.has('EXT_color_buffer_half_float');
+  }
+
+  /** Motion blur: starts a new output frame with an empty sum. */
+  accumBegin() {
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    if (!this.accumTarget || this.accumTarget.width !== size.x || this.accumTarget.height !== size.y) {
+      this.accumTarget?.dispose();
+      this.accumTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        type: THREE.HalfFloatType,
+        depthBuffer: false,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+      });
+    }
+    const r = this.renderer;
+    r.setRenderTarget(this.accumTarget);
+    r.setClearColor(0x000000, 1);
+    r.clear();
+    r.setRenderTarget(null);
+  }
+
+  /** Motion blur: adds the sub-frame that was just drawn on the canvas, with a weight (1 / samples). */
+  accumAdd(weight: number) {
+    const r = this.renderer;
+    this.accumMaterial.uniforms.tFrame.value = this.copyFrame();
+    this.accumMaterial.uniforms.uWeight.value = weight;
+    const autoClear = r.autoClear;
+    r.autoClear = false;
+    r.setRenderTarget(this.accumTarget);
+    r.render(this.accumQuad, this.quadCamera);
+    r.setRenderTarget(null);
+    r.autoClear = autoClear;
+  }
+
+  /**
+   * Finishes the frame: transition effects and the look (grade, vignette,
+   * grain). `source` is the frame just drawn on the canvas, or the motion
+   * blur sum built with accumBegin / accumAdd.
+   *
+   * The frame is always drawn straight to the canvas first and copied from
+   * there, because Spark blends splats differently (in linear light) when
+   * it renders into an offscreen target, which would change how scans look.
+   * With nothing to apply this does nothing, so plain frames are untouched.
+   */
+  present(fx: FrameFx | null, look: LookSettings | null = null, seed = 0, source: 'canvas' | 'accum' = 'canvas') {
+    const graded = gradeActive(look);
+    const hasFx = !!fx && fxActive(fx);
+    if (!graded && !hasFx && source === 'canvas') return;
     const u = this.postMaterial.uniforms;
-    u.tFrame.value = this.frameCopy;
-    u.uFlash.value = fx.flash;
-    u.uWhip.value = fx.whip;
+    u.tFrame.value = source === 'accum' ? this.accumTarget!.texture : this.copyFrame();
+    u.uLinearInput.value = source === 'accum';
+    u.uFlash.value = hasFx ? fx!.flash : 0;
+    u.uWhip.value = hasFx ? fx!.whip : 0;
+    u.uExposure.value = graded ? look!.exposure : 0;
+    u.uContrast.value = graded ? look!.contrast : 1;
+    u.uSaturation.value = graded ? look!.saturation : 1;
+    u.uWarmth.value = graded ? look!.warmth : 0;
+    u.uSplit.value = graded ? look!.splitTone : 0;
+    u.uFade.value = graded ? look!.fade : 0;
+    u.uVignette.value = graded ? look!.vignette : 0;
+    u.uGrain.value = graded ? look!.grain : 0;
+    u.uSeed.value = seed % 1024;
+    this.renderer.getDrawingBufferSize(u.uResolution.value);
     this.renderer.render(this.postQuad, this.quadCamera);
   }
 
@@ -313,15 +480,21 @@ export class Viewer {
 
   // ---- offline rendering -------------------------------------------------
 
-  /** Switches the canvas to the exact export size and stops the live loop. */
-  beginExport(width: number, height: number) {
+  /**
+   * Stops the live loop for exact rendering. With a size the canvas switches
+   * to exactly that many pixels (export); without, it keeps its preview size.
+   */
+  beginExport(width?: number, height?: number) {
     this.exporting = true;
     this.renderer.getSize(this.savedSize);
     this.savedPixelRatio = this.renderer.getPixelRatio();
-    this.renderer.setPixelRatio(1);
-    this.renderer.setSize(width, height, false);
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
+    this.exportResized = !!(width && height);
+    if (width && height) {
+      this.renderer.setPixelRatio(1);
+      this.renderer.setSize(width, height, false);
+      this.camera.aspect = width / height;
+      this.camera.updateProjectionMatrix();
+    }
     this.helpers.visible = false;
     // from here on Spark only updates when renderExact() asks it to
     this.spark.autoUpdate = false;
@@ -330,10 +503,14 @@ export class Viewer {
   endExport() {
     this.spark.autoUpdate = true;
     this.helpers.visible = true;
-    this.renderer.setPixelRatio(this.savedPixelRatio);
-    this.renderer.setSize(this.savedSize.x, this.savedSize.y, false);
     this.exporting = false;
-    this.resize();
+    // setting the size clears the canvas, so only do it if it was changed
+    // (a test frame keeps the preview size and must stay on screen)
+    if (this.exportResized) {
+      this.renderer.setPixelRatio(this.savedPixelRatio);
+      this.renderer.setSize(this.savedSize.x, this.savedSize.y, false);
+      this.resize();
+    }
   }
 
   /**

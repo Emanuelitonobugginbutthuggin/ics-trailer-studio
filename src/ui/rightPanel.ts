@@ -4,11 +4,23 @@ import type { Easing, Shot, SplatShot, Transition, VideoShot } from '../project/
 import { PRESETS } from '../shots/presets';
 import { button, checkRow, h, numberRow, section, sliderRow } from './dom';
 import { openExportDialog } from './exportDialog';
+import { lookSections } from './lookPanel';
 
 /** Shots list, shot settings, presets, keyframes and export. */
 export function renderRightPanel(app: App, root: HTMLElement) {
   const scroll = root.scrollTop;
-  root.replaceChildren(shotsSection(app), ...shotSections(app));
+  const tab = (id: 'shots' | 'look', label: string, title: string) =>
+    button(label, () => {
+      app.rightTab = id;
+      app.changed();
+    }, { class: app.rightTab === id ? 'btn active' : 'btn', title });
+  const tabs = h(
+    'div',
+    { class: 'tabs seg', role: 'group', 'aria-label': 'Panel' },
+    tab('shots', 'Shots', 'Shots, keyframes and clip settings'),
+    tab('look', 'Look', 'Grade, vignette, grain and motion blur for the whole trailer'),
+  );
+  root.replaceChildren(tabs, ...(app.rightTab === 'look' ? lookSections(app) : [shotsSection(app), ...shotSections(app)]));
   root.scrollTop = scroll;
 }
 
